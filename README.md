@@ -6,10 +6,10 @@
 
 Fast, zero-build static frontend for [make.fun](https://make.fun/bounty/makefun-frontend-01) built with plain HTML, CSS, and ES modules under `app/` reading only `https://make.fun/api` via read-only `GET` requests:
 
-- **Live Bounty Board (`#/`)**: Separates bounties taking entries from past-deadline bounties in judging using `deadline` (not `status` alone), highlighting live USDC pots, fee-funded pot growth, entry fees, live in-place countdowns, category chips, and instant `/` search.
+- **Live Bounty Board (`#/`)**: Separates bounties taking entries from upcoming and past-deadline bounties in judging using `deadline` and `opensAt` (not `status` alone), highlighting live USDC pots, fee-funded pot growth, entry fees, auto-transitioning countdowns, category chips, and instant `/` search.
 - **Bounty Page (`#/bounty/<slug>`)**: Shows summary, live-pot rewards table with base + entry-fee split (`rewardsNow`), UTC schedule and phases, formatted Markdown description, and collapsible rules sections.
 - **Leaderboard (`#/bounty/<slug>/leaderboard`)**: Supports `Development` and `Final` phases, 50-row client-side pagination for multi-thousand-entry boards, instant `@handle` / title search, formatted judge win rates with 90% confidence intervals, and CORP-safe (`crossorigin="anonymous"`) avatars and artifact thumbnails.
-- **Public Profile & Builders (`#/u/<handle>`, `#/rankings`)**: Displays an account's verified USDC earnings, wins, podiums, external links, paginated solution history, and on-chain Solana payout receipts.
+- **Public Profile & Builders (`#/u/<handle>`, `#/rankings`)**: Displays an account's verified USDC earnings, wins, podiums, external links, paginated solution history, on-chain Solana payout receipts, and cursor-paginated builder rankings.
 - **Minute-Bound ETag Cache**: Caches responses per UTC minute in memory and `sessionStorage`, revalidates conditionally across minutes with `If-None-Match`, deduplicates concurrent requests, and lazy-loads surface modules via `import()`.
 
 ## Run it

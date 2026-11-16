@@ -4,7 +4,7 @@ import { avatarHtml, bountyState, countdownInfo, dateUtc, esc, intFmt, money, po
 
 function formatInlineMd(rawText) {
   let out = esc(rawText);
-  out = out.replace(/`([^`]+)`/g, '<code>$1</code>');
+  out = out.replace(/`([^`]+)`/g, '<code translate="no">$1</code>');
   out = out.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
   out = out.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+|\/[^\s)]+)\)/g, (_, label, url) => {
     const href = url.startsWith('/') ? `https://make.fun${url}` : url;
@@ -41,7 +41,7 @@ export function renderMarkdownBlocks(markdown) {
       flushPara();
       flushList();
       if (inCode) {
-        html.push(`<pre><code>${esc(codeLines.join('\n'))}</code></pre>`);
+        html.push(`<pre translate="no"><code>${esc(codeLines.join('\n'))}</code></pre>`);
         codeLines = [];
         inCode = false;
       } else {
@@ -141,18 +141,11 @@ function ordinalPlace(start, end) {
   return start === end ? ord(start) : `${ord(start)}–${ord(end)}`;
 }
 
-export function renderBountySkeleton(preview, slug) {
-  const title = preview?.title || slug;
-  return `
-    <section class="bounty-surface" aria-busy="true">
-      <nav class="subnav" aria-label="Bounty navigation">
-        <a class="back-link" href="#/">← All bounties</a>
-      </nav>
-      <h1>${esc(title)}</h1>
-      ${preview?.summary ? `<p class="lead">${esc(preview.summary)}</p>` : '<div class="skel-block skel-title"></div>'}
-      <div class="skel-block" style="height:140px;margin-top:20px"></div>
-    </section>`;
-}
+const HARNESS_LABELS = {
+  'program/v1': 'Sandboxed program',
+  'agent/v1': 'Live agent',
+  'patch/v1': 'Repository patch',
+};
 
 export function renderBountySurface(container, b) {
   const nowMs = Date.now();
@@ -162,14 +155,15 @@ export function renderBountySurface(container, b) {
   const { rawCount, groups } = groupRewardRows(b);
   const slugEnc = encodeURIComponent(b.slug);
   const lbHref = `#/bounty/${slugEnc}/leaderboard`;
+  const harnessLabel = b.harnessKind ? HARNESS_LABELS[b.harnessKind] || '' : '';
 
   const rewardsTableHtml = groups.length
-    ? `<table class="data-table rewards-table">
+    ? `<div class="rewards-wrap"><table class="data-table rewards-table">
         <thead>
           <tr>
             <th>Place</th>
             ${pot.grew ? '<th class="num">Base</th><th class="num">+ Fees</th>' : ''}
-            <th class="num">Live Reward</th>
+            <th class="num">Reward</th>
           </tr>
         </thead>
         <tbody>
@@ -177,7 +171,7 @@ export function renderBountySurface(container, b) {
             .map((g) => {
               const eachSuffix = g.startPlace !== g.endPlace ? ' <span class="each-tag">each</span>' : '';
               return `<tr>
-                <td><strong>${esc(ordinalPlace(g.startPlace, g.endPlace))}</strong>${eachSuffix}</td>
+                <td class="nowrap"><strong>${esc(ordinalPlace(g.startPlace, g.endPlace))}</strong>${eachSuffix}</td>
                 ${
                   pot.grew
                     ? `<td class="num muted-cell">${esc(money(g.base))}</td>
@@ -191,12 +185,12 @@ export function renderBountySurface(container, b) {
         </tbody>
         <tfoot>
           <tr>
-            <td><strong>Total Pot (${intFmt(rawCount)} paid ${rawCount === 1 ? 'place' : 'places'})</strong></td>
+            <td class="nowrap"><strong>Total (${intFmt(rawCount)})</strong></td>
             ${pot.grew ? `<td class="num">${esc(money(pot.baseUsd))}</td><td class="num fee-bonus">+${esc(money(pot.feesUsd, true))}</td>` : ''}
             <td class="num"><strong class="ink-emerald">${esc(pot.liveText)}</strong></td>
           </tr>
         </tfoot>
-      </table>`
+      </table></div>`
     : '<p class="muted-cell">Reward schedule unavailable.</p>';
 
   const phasesHtml = Array.isArray(b.phases) && b.phases.length
@@ -207,7 +201,6 @@ export function renderBountySurface(container, b) {
           <div class="phase-item">
             <div class="phase-head">
               <strong>${esc(p.title || p.key)}</strong>
-              <span class="tag-subtle">${esc(p.key)}</span>
             </div>
             ${p.startsAt || p.starts_at || p.endsAt || p.ends_at ? `<div class="phase-dates">${esc(dateUtc(p.startsAt || p.starts_at))} → ${esc(dateUtc(p.endsAt || p.ends_at))}</div>` : ''}
             ${p.description ? `<p class="phase-desc">${esc(p.description)}</p>` : ''}
@@ -222,7 +215,7 @@ export function renderBountySurface(container, b) {
         <div class="winner-row">
           ${avatarHtml(b.winner.image, b.winner.handle, 32)}
           <div>
-            <strong>Winner: <a href="#/u/${encodeURIComponent(b.winner.handle)}">@${esc(b.winner.handle)}</a></strong>
+            <strong>Winner: <a href="#/u/${encodeURIComponent(b.winner.handle)}" translate="no">@${esc(b.winner.handle)}</a></strong>
             ${b.winner.title ? `<span class="sep">·</span><span>${esc(b.winner.title)}</span>` : ''}
             ${b.winner.amountUsd ? `<span class="sep">·</span><strong class="ink-emerald">${esc(money(b.winner.amountUsd, true))} USDC</strong>` : ''}
           </div>
@@ -237,7 +230,7 @@ export function renderBountySurface(container, b) {
   container.innerHTML = `
     <article class="bounty-surface">
       <nav class="subnav" aria-label="Bounty navigation">
-        <a class="back-link" href="#/">← All bounties</a>
+        <a class="back-link" href="#/">← Board</a>
         <div class="surface-tabs">
           <a class="surface-tab is-active" href="#/bounty/${slugEnc}" aria-current="page">Overview &amp; Rules</a>
           <a class="surface-tab" href="${lbHref}">Leaderboard <span class="tab-count">${intFmt(b.submissionCount)}</span></a>
@@ -248,7 +241,7 @@ export function renderBountySurface(container, b) {
         <div class="bounty-badges">
           <span class="pill pill-${state.key}">${esc(state.label)}</span>
           ${b.category ? `<span class="cat-tag">${esc(b.category)}</span>` : ''}
-          ${b.harnessKind ? `<span class="tag-subtle">${esc(b.harnessKind)}</span>` : ''}
+          ${harnessLabel ? `<span class="tag-subtle">${esc(harnessLabel)}</span>` : ''}
           ${b.escrowLock || b.escrowLifecycle ? `<span class="tag-subtle">USDC Escrowed on Solana</span>` : ''}
         </div>
         <h1>${esc(b.title)}</h1>
@@ -258,7 +251,7 @@ export function renderBountySurface(container, b) {
           <div class="fact-cell">
             <dt>Live Pot</dt>
             <dd>
-              <strong class="fact-big ink-emerald">${esc(pot.liveText)}</strong>
+              <strong class="fact-hero ink-emerald">${esc(pot.liveText)}</strong>
               ${pot.grew ? `<span class="fact-sub">${esc(money(pot.baseUsd))} + ${esc(money(pot.feesUsd, true))} (${intFmt(pot.payers)} fees)</span>` : '<span class="fact-sub">USDC on Solana</span>'}
             </dd>
           </div>
@@ -266,27 +259,28 @@ export function renderBountySurface(container, b) {
             <dt>Entry Fee</dt>
             <dd>
               <strong class="fact-big ${pot.feeUnitUsd > 0 ? 'ink-amber' : ''}">${pot.feeUnitUsd > 0 ? esc(money(pot.feeUnitUsd, true)) : 'Free'}</strong>
-              <span class="fact-sub">${pot.feeUnitUsd > 0 ? 'Once per account · joins pot' : 'No entry fee'}</span>
+              <span class="fact-sub">${pot.feeUnitUsd > 0 ? 'Once per account, joins pot' : 'No entry fee'}</span>
             </dd>
           </div>
           <div class="fact-cell">
-            <dt>${state.takingEntries ? 'Time Left' : 'Deadline'}</dt>
+            <dt>${state.takingEntries ? 'Time Left' : state.key === 'upcoming' ? 'Opens' : 'Deadline'}</dt>
             <dd>
-              <strong class="fact-big ${state.takingEntries && cd.urgent ? 'ink-amber' : ''}" ${state.takingEntries ? `data-deadline="${esc(b.deadline)}"` : ''}>${esc(state.takingEntries ? cd.text : state.label)}</strong>
-              <span class="fact-sub">${esc(dateUtc(b.deadline))}</span>
+              <strong class="fact-big ${state.takingEntries && cd.urgent ? 'ink-amber' : ''}" ${state.takingEntries ? `data-deadline="${esc(b.deadline)}" data-countdown-active="1"` : ''}>${esc(state.takingEntries ? cd.text : state.label)}</strong>
+              <span class="fact-sub">${esc(dateUtc(state.key === 'upcoming' && (b.opensAt || b.opens_at) ? (b.opensAt || b.opens_at) : b.deadline))}</span>
             </dd>
           </div>
           <div class="fact-cell">
             <dt>Opened</dt>
             <dd>
-              <strong class="fact-val">${esc(dateUtc(b.opensAt || b.publishedAt))}</strong>
-              <span class="fact-sub">${b.resolvedAt ? `Resolved ${esc(dateUtc(b.resolvedAt))}` : b.placementsHeld ? 'Final placements held till end' : 'Live standings'}</span>
+              <strong class="fact-big">${esc(dateUtc(b.opensAt || b.publishedAt))}</strong>
+              <span class="fact-sub">${b.resolvedAt ? `Resolved ${esc(dateUtc(b.resolvedAt))}` : b.placementsHeld ? 'Final places held till end' : 'Live standings'}</span>
             </dd>
           </div>
           <div class="fact-cell">
-            <dt>Standings</dt>
+            <dt>Entries</dt>
             <dd>
-              <a class="btn-primary" href="${lbHref}">View Leaderboard (${intFmt(b.submissionCount)}) →</a>
+              <strong class="fact-big">${intFmt(b.submissionCount)}</strong>
+              <a class="fact-link" href="${lbHref}">View leaderboard →</a>
             </dd>
           </div>
         </dl>

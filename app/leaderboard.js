@@ -71,7 +71,7 @@ export function renderLeaderboardSurface(container, lb, slug, preview, onSwitchP
   container.innerHTML = `
     <section class="leaderboard-surface">
       <nav class="subnav" aria-label="Bounty navigation">
-        <a class="back-link" href="#/">← All bounties</a>
+        <a class="back-link" href="#/">← Board</a>
         <div class="surface-tabs">
           <a class="surface-tab" href="#/bounty/${slugEnc}">Overview &amp; Rules</a>
           <a class="surface-tab is-active" href="#/bounty/${slugEnc}/leaderboard" aria-current="page">Leaderboard <span class="tab-count">${intFmt(allEntries.length)}</span></a>
@@ -91,15 +91,15 @@ export function renderLeaderboardSurface(container, lb, slug, preview, onSwitchP
         </div>
 
         <div class="seg-tabs" role="group" aria-label="Competition phase">
-          <button type="button" class="phase-btn ${currentPhase === 'dev' ? 'is-active' : ''}" data-phase="dev">Development</button>
-          <button type="button" class="phase-btn ${currentPhase === 'final' ? 'is-active' : ''}" data-phase="final">Final</button>
+          <button type="button" class="phase-btn ${currentPhase === 'dev' ? 'is-active' : ''}" aria-pressed="${currentPhase === 'dev'}" data-phase="dev">Development</button>
+          <button type="button" class="phase-btn ${currentPhase === 'final' ? 'is-active' : ''}" aria-pressed="${currentPhase === 'final'}" data-phase="final">Final</button>
         </div>
       </header>
 
       <div class="controls-bar">
         <div class="filter-controls">
           <label class="sr-only" for="lb-search">Filter entries by handle or title</label>
-          <input id="lb-search" class="filter-input" type="search" placeholder="Search @handle or entry title… (/)" autocomplete="off">
+          <input id="lb-search" class="filter-input" type="search" enterkeyhint="search" placeholder="Filter @handle or title… (/)" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
           ${
             hasHouse
               ? `<label class="check-toggle">
@@ -140,9 +140,9 @@ export function renderLeaderboardSurface(container, lb, slug, preview, onSwitchP
       ? `<span class="pager-info">Showing ${intFmt(paged.start)}–${intFmt(paged.end)} of ${intFmt(paged.total)}</span>
          ${
            paged.totalPages > 1
-             ? `<button type="button" class="btn-secondary" data-page="${paged.page - 1}" ${paged.page <= 1 ? 'disabled' : ''}>‹ Prev</button>
+             ? `<button type="button" class="btn-secondary" data-page="${paged.page - 1}" ${paged.page <= 1 ? 'disabled' : ''}>Prev</button>
                 <span class="pager-page">${paged.page} / ${paged.totalPages}</span>
-                <button type="button" class="btn-secondary" data-page="${paged.page + 1}" ${paged.page >= paged.totalPages ? 'disabled' : ''}>Next ›</button>`
+                <button type="button" class="btn-secondary" data-page="${paged.page + 1}" ${paged.page >= paged.totalPages ? 'disabled' : ''}>Next</button>`
              : ''
          }`
       : '<span class="pager-info">0 matching entries</span>';
@@ -152,8 +152,11 @@ export function renderLeaderboardSurface(container, lb, slug, preview, onSwitchP
         ? (lb?.phase?.scores_visible === false
             ? 'Scores for this phase are sealed until judging completes. Switch to Development phase to inspect provisional entries.'
             : 'No ranked entries in this phase yet.')
-        : 'No entries match your search query.';
-      resultsEl.innerHTML = `<div class="empty-box"><p>${esc(reason)}</p></div>`;
+        : 'No entries match your current filter.';
+      const resetHtml = allEntries.length > 0 && (ui.q || ui.hideHouse)
+        ? `<div class="error-actions"><button type="button" class="btn-secondary" data-clear-lb="1">Clear filter</button></div>`
+        : '';
+      resultsEl.innerHTML = `<div class="empty-box"><p>${esc(reason)}</p>${resetHtml}</div>`;
       return;
     }
 
@@ -168,7 +171,7 @@ export function renderLeaderboardSurface(container, lb, slug, preview, onSwitchP
         const handleCell = row.handle
           ? `<a class="entrant-link" href="#/u/${encodeURIComponent(row.handle)}">
               ${avatarHtml(row.image, row.handle, 26)}
-              <span class="handle-text">@${esc(row.handle)}</span>
+              <span class="handle-text" translate="no">@${esc(row.handle)}</span>
             </a>`
           : `<span class="entrant-link">${avatarHtml('', 'H', 26)}<span class="muted-cell">House</span></span>`;
 
@@ -178,40 +181,42 @@ export function renderLeaderboardSurface(container, lb, slug, preview, onSwitchP
         if (row.house || row.baseline) metaParts.push('<span class="tag-subtle">House anchor</span>');
         if (costStr !== '—') metaParts.push(`<span>Cost ${esc(costStr)}</span>`);
         if (wallStr !== '—') metaParts.push(`<span>Built in ${esc(wallStr)}</span>`);
-        if (row.received_at) metaParts.push(`<span>${esc(dateUtc(row.received_at))}</span>`);
+        const dateExtra = row.received_at
+          ? `<span class="col-hide-sm">${metaParts.length ? '<span class="sep">·</span>' : ''}${esc(dateUtc(row.received_at))}</span>`
+          : '';
+
+        const rankHtml = displayRank <= 3 && !row.house
+          ? `<span class="rank-badge rank-top-${displayRank}">#${intFmt(displayRank)}</span>`
+          : `<span class="rank-plain">#${intFmt(displayRank)}</span>`;
 
         return `
           <tr class="${displayRank <= 3 && !row.house ? `podium-row podium-${displayRank}` : ''}">
             <td class="rank-cell">
-              <span class="rank-badge ${displayRank <= 3 ? `rank-top-${displayRank}` : ''}">#${intFmt(displayRank)}</span>
+              ${rankHtml}
               ${estReward ? `<span class="est-prize" title="Place ${prizePlace} reward at current pot">${esc(money(estReward, !Number.isInteger(estReward)))}</span>` : ''}
             </td>
             <td class="entrant-cell">
               <div class="entrant-wrap">
-                ${thumbUrl ? `<img class="artifact-thumb" crossorigin="anonymous" loading="lazy" width="44" height="28" alt="" src="${esc(thumbUrl)}">` : ''}
+                ${thumbUrl ? `<img class="artifact-thumb col-hide-sm" crossorigin="anonymous" loading="lazy" width="44" height="28" alt="" src="${esc(thumbUrl)}">` : ''}
                 <div class="entrant-body">
-                  <div class="entrant-top">
-                    ${handleCell}
-                    ${row.title ? `<span class="entry-title">${esc(row.title)}</span>` : ''}
-                  </div>
-                  ${metaParts.length ? `<div class="entry-meta">${metaParts.join('<span class="sep">·</span>')}</div>` : ''}
+                  <div class="entrant-top">${handleCell}</div>
+                  ${row.title ? `<div class="entry-title">${esc(row.title)}</div>` : ''}
+                  ${metaParts.length || dateExtra ? `<div class="entry-meta">${metaParts.join('<span class="sep">·</span>')}${dateExtra}</div>` : ''}
                 </div>
               </div>
             </td>
-            ${cols.map((col) => `<td class="num metric-cell" data-label="${esc(col.title)}">${formatCell(col, row)}</td>`).join('')}
+            ${cols.map((col, idx) => `<td class="num metric-cell ${idx > 0 ? 'col-hide-sm' : ''}" data-label="${esc(col.title)}">${formatCell(col, row)}</td>`).join('')}
           </tr>`;
       })
       .join('');
 
     const pagerHtml = paged.totalPages > 1
       ? `<nav class="pager" aria-label="Leaderboard pagination">
-          <span class="pager-info">Rows ${intFmt(paged.start)}–${intFmt(paged.end)} of ${intFmt(paged.total)} (50 per page)</span>
+          <span class="pager-info">Showing ${intFmt(paged.start)}–${intFmt(paged.end)} of ${intFmt(paged.total)}</span>
           <div class="pager-btns">
-            <button type="button" class="btn-secondary" data-page="1" ${paged.page <= 1 ? 'disabled' : ''}>First</button>
             <button type="button" class="btn-secondary" data-page="${paged.page - 1}" ${paged.page <= 1 ? 'disabled' : ''}>Prev</button>
-            <span class="pager-page">Page ${paged.page} / ${paged.totalPages}</span>
+            <span class="pager-page">${paged.page} / ${paged.totalPages}</span>
             <button type="button" class="btn-secondary" data-page="${paged.page + 1}" ${paged.page >= paged.totalPages ? 'disabled' : ''}>Next</button>
-            <button type="button" class="btn-secondary" data-page="${paged.totalPages}" ${paged.page >= paged.totalPages ? 'disabled' : ''}>Last</button>
           </div>
         </nav>`
       : '';
@@ -223,7 +228,7 @@ export function renderLeaderboardSurface(container, lb, slug, preview, onSwitchP
             <tr>
               <th class="rank-col">Rank</th>
               <th>Entrant &amp; Entry</th>
-              ${cols.map((col) => `<th class="num">${esc(col.title)}</th>`).join('')}
+              ${cols.map((col, idx) => `<th class="num ${idx > 0 ? 'col-hide-sm' : ''}">${esc(col.title)}</th>`).join('')}
             </tr>
           </thead>
           <tbody>${rowsHtml}</tbody>
@@ -243,6 +248,16 @@ export function renderLeaderboardSurface(container, lb, slug, preview, onSwitchP
     paintRows();
   });
   const handlePageClick = (e) => {
+    const clearBtn = e.target.closest('[data-clear-lb]');
+    if (clearBtn) {
+      ui.q = '';
+      ui.hideHouse = false;
+      ui.page = 1;
+      if (searchInput) searchInput.value = '';
+      if (houseCheck) houseCheck.checked = false;
+      paintRows();
+      return;
+    }
     const btn = e.target.closest('[data-page]');
     if (btn && !btn.disabled) {
       ui.page = Number(btn.dataset.page);

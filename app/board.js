@@ -4,31 +4,13 @@ import { avatarHtml, bountyState, countdownInfo, dateUtc, esc, intFmt, money, pa
 
 const CATEGORIES = ['All', 'Code', 'Games', 'Trading', 'Security', 'Forecasting', 'Growth', 'Automation'];
 
-export function renderBoardSkeleton() {
-  const rows = Array.from({ length: 6 }, () => `
-    <div class="ledger-row skeleton-row" aria-hidden="true">
-      <div class="skel-block skel-title"></div>
-      <div class="skel-block skel-num"></div>
-      <div class="skel-block skel-num"></div>
-      <div class="skel-block skel-num"></div>
-      <div class="skel-block skel-num"></div>
-    </div>`).join('');
-  return `
-    <section class="board-surface" aria-busy="true" aria-label="Loading bounties">
-      <div class="page-head">
-        <h1>Live Bounties</h1>
-        <p class="subhead">Fetching current pots, entry fees, and deadlines from make.fun…</p>
-      </div>
-      <div class="ledger">${rows}</div>
-    </section>`;
-}
-
 function sortBounties(list, sortBy, nowMs) {
   const copy = [...list];
   copy.sort((a, b) => {
     const sa = bountyState(a, nowMs);
     const sb = bountyState(b, nowMs);
     if (sa.takingEntries !== sb.takingEntries) return sa.takingEntries ? -1 : 1;
+    if ((sa.key === 'upcoming') !== (sb.key === 'upcoming')) return sa.key === 'upcoming' ? -1 : 1;
 
     if (sortBy === 'pot') {
       const diff = potDetails(b).liveUsd - potDetails(a).liveUsd;
@@ -74,19 +56,20 @@ function renderRow(b, nowMs) {
 
   let timePrimary;
   let timeSecondary;
+  const opensIso = b.opensAt || b.opens_at;
   if (state.key === 'open') {
-    timePrimary = `<span class="countdown ${cd.urgent ? 'is-urgent' : ''}" data-deadline="${esc(b.deadline)}">${esc(cd.text)}</span>`;
+    timePrimary = `<span class="countdown ${cd.urgent ? 'is-urgent' : ''}" data-deadline="${esc(b.deadline)}" data-countdown-active="1">${esc(cd.text)}</span>`;
     timeSecondary = `<span class="cell-note">${esc(dateUtc(b.deadline))}</span>`;
   } else if (state.key === 'judging') {
     timePrimary = `<span class="pill pill-judging">Past deadline</span>`;
     timeSecondary = `<span class="cell-note" data-deadline="${esc(b.deadline)}">${esc(cd.text)}</span>`;
   } else if (state.key === 'upcoming') {
     timePrimary = `<span class="pill pill-upcoming">Opens soon</span>`;
-    timeSecondary = `<span class="cell-note">${esc(dateUtc(b.opensAt))}</span>`;
+    timeSecondary = `<span class="cell-note">${esc(dateUtc(opensIso || b.deadline))}</span>`;
   } else {
     timePrimary = `<span class="pill pill-resolved">Resolved</span>`;
     timeSecondary = b.winner?.handle
-      ? `<a class="winner-inline" href="#/u/${encodeURIComponent(b.winner.handle)}">${avatarHtml(b.winner.image, b.winner.handle, 16)}<span>@${esc(b.winner.handle)}</span></a>`
+      ? `<a class="winner-inline" href="#/u/${encodeURIComponent(b.winner.handle)}">${avatarHtml(b.winner.image, b.winner.handle, 16)}<span translate="no">@${esc(b.winner.handle)}</span></a>`
       : `<span class="cell-note">${esc(dateUtc(b.deadline))}</span>`;
   }
 
@@ -94,10 +77,8 @@ function renderRow(b, nowMs) {
     <article class="ledger-row state-${state.key}">
       <div class="col-main">
         <div class="row-topline">
-          <span class="status-dot dot-${state.key}" aria-hidden="true"></span>
-          <a class="row-title" href="${slugUrl}">${esc(b.title)}</a>
+          <h2 class="row-heading"><a class="row-title" href="${slugUrl}">${esc(b.title)}</a></h2>
           ${b.category ? `<span class="cat-tag">${esc(b.category)}</span>` : ''}
-          ${b.side_bets?.trading_now ? `<span class="tag-subtle" title="On-chain side market active">Market live</span>` : ''}
         </div>
         ${b.summary ? `<p class="row-summary">${esc(b.summary)}</p>` : ''}
       </div>
@@ -125,16 +106,18 @@ export function renderBoardSurface(container, data, state, onChange) {
   const allItems = Array.isArray(data?.items) ? data.items : [];
   const nowMs = Date.now();
 
-  const buckets = { open: [], judging: [], resolved: [], all: allItems };
+  const buckets = { open: [], upcoming: [], judging: [], resolved: [], all: allItems };
   let openPotSum = 0;
   let openWithFeeCount = 0;
 
   for (const item of allItems) {
     const st = bountyState(item, nowMs);
-    if (st.key === 'open' || st.key === 'upcoming') {
+    if (st.key === 'open') {
       buckets.open.push(item);
       openPotSum += potDetails(item).liveUsd;
       if (Number(item.entryFeeUsd) > 0) openWithFeeCount++;
+    } else if (st.key === 'upcoming') {
+      buckets.upcoming.push(item);
     } else if (st.key === 'judging') {
       buckets.judging.push(item);
     } else {
@@ -146,6 +129,15 @@ export function renderBoardSurface(container, data, state, onChange) {
     (c) => c === 'All' || allItems.some((b) => b.category === c),
   );
 
+  const subheadParts = [
+    `<strong>${intFmt(buckets.open.length)} open by deadline</strong>`,
+    `<span><strong class="ink-emerald">${esc(money(openPotSum))}</strong> live USDC in open pots</span>`,
+  ];
+  if (openWithFeeCount) subheadParts.push(`<span>${intFmt(openWithFeeCount)} growing with entry fees</span>`);
+  if (buckets.upcoming.length) subheadParts.push(`<span>${intFmt(buckets.upcoming.length)} upcoming</span>`);
+  if (buckets.judging.length) subheadParts.push(`<span>${intFmt(buckets.judging.length)} past deadline in judging</span>`);
+  const subheadHtml = subheadParts.map((s) => `<span class="subhead-item">${s}</span>`).join('');
+
   // Build static scaffold once per route visit so typing in search never drops focus.
   if (!container.querySelector('#board-results')) {
     container.innerHTML = `
@@ -153,35 +145,32 @@ export function renderBoardSurface(container, data, state, onChange) {
         <div class="board-header">
           <div>
             <h1>Live Bounty Board</h1>
-            <p class="subhead">
-              <strong>${intFmt(buckets.open.length)} open by deadline</strong>
-              <span class="sep">·</span>
-              <strong class="ink-emerald">${esc(money(openPotSum))}</strong> live USDC in open pots
-              ${openWithFeeCount ? `<span class="sep">·</span><span>${intFmt(openWithFeeCount)} growing with entry fees</span>` : ''}
-              ${buckets.judging.length ? `<span class="sep">·</span><span>${intFmt(buckets.judging.length)} past deadline in judging</span>` : ''}
-            </p>
+            <p id="board-subhead" class="subhead subhead-list">${subheadHtml}</p>
           </div>
         </div>
 
         <div class="controls-bar">
           <div class="seg-tabs" role="tablist" aria-label="Bounty lifecycle filter">
-            <button type="button" role="tab" data-tab="open">Open now <span class="tab-count">${intFmt(buckets.open.length)}</span></button>
-            <button type="button" role="tab" data-tab="judging" title="API status may still read open after deadline until results publish">Judging <span class="tab-count">${intFmt(buckets.judging.length)}</span></button>
-            <button type="button" role="tab" data-tab="resolved">Resolved <span class="tab-count">${intFmt(buckets.resolved.length)}</span></button>
-            <button type="button" role="tab" data-tab="all">All <span class="tab-count">${intFmt(allItems.length)}</span></button>
+            <button type="button" role="tab" data-tab="open">Open now <span class="tab-count" data-count="open">${intFmt(buckets.open.length)}</span></button>
+            <button type="button" role="tab" data-tab="upcoming" ${buckets.upcoming.length ? '' : 'hidden'}>Upcoming <span class="tab-count" data-count="upcoming">${intFmt(buckets.upcoming.length)}</span></button>
+            <button type="button" role="tab" data-tab="judging" title="API status may still read open after deadline until results publish">Judging <span class="tab-count" data-count="judging">${intFmt(buckets.judging.length)}</span></button>
+            <button type="button" role="tab" data-tab="resolved">Resolved <span class="tab-count" data-count="resolved">${intFmt(buckets.resolved.length)}</span></button>
+            <button type="button" role="tab" data-tab="all">All <span class="tab-count" data-count="all">${intFmt(allItems.length)}</span></button>
           </div>
 
-          <div class="filter-controls">
+          <div class="filter-controls board-filters">
             <label class="sr-only" for="board-search">Filter bounties</label>
-            <input id="board-search" class="filter-input" type="search" placeholder="Filter bounties… (/)" value="${esc(state.q || '')}" autocomplete="off">
+            <input id="board-search" class="filter-input" type="search" enterkeyhint="search" placeholder="Filter bounties… (/)" value="${esc(state.q || '')}" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
             <label class="sr-only" for="board-sort">Sort bounties</label>
-            <select id="board-sort" class="filter-select">
-              <option value="featured">Featured &amp; ending soon</option>
-              <option value="pot">Largest live pot</option>
-              <option value="ending">Closing soonest</option>
-              <option value="entries">Most entries</option>
-              <option value="fee">Paid-entry first</option>
-            </select>
+            <span class="select-wrap">
+              <select id="board-sort" class="filter-select">
+                <option value="featured">Featured</option>
+                <option value="pot">Largest live pot</option>
+                <option value="ending">Closing soonest</option>
+                <option value="entries">Most entries</option>
+                <option value="fee">Paid-entry first</option>
+              </select>
+            </span>
           </div>
         </div>
 
@@ -208,10 +197,19 @@ export function renderBoardSurface(container, data, state, onChange) {
         onChange({ page: Number(pageBtn.dataset.page) });
       }
     });
+  } else {
+    const subEl = container.querySelector('#board-subhead');
+    if (subEl) subEl.innerHTML = subheadHtml;
+    for (const [k, arr] of Object.entries(buckets)) {
+      const cEl = container.querySelector(`[data-count="${k}"]`);
+      if (cEl) cEl.textContent = intFmt(arr.length);
+    }
   }
 
   // Sync active control states without touching input selection.
   const activeTab = buckets[state.tab] ? state.tab : 'open';
+  const upcomingBtn = container.querySelector('[data-tab="upcoming"]');
+  if (upcomingBtn) upcomingBtn.hidden = buckets.upcoming.length === 0 && activeTab !== 'upcoming';
   container.querySelectorAll('[data-tab]').forEach((btn) => {
     const active = btn.dataset.tab === activeTab;
     btn.classList.toggle('is-active', active);

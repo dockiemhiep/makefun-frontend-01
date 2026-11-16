@@ -102,9 +102,10 @@ export function bountyState(bounty, nowMs = Date.now()) {
     return { key: 'resolved', label: 'Resolved', takingEntries: false };
   }
   const deadlineMs = bounty?.deadline ? Date.parse(bounty.deadline) : NaN;
-  const opensMs = bounty?.opensAt ? Date.parse(bounty.opensAt) : NaN;
+  const opensRaw = bounty?.opensAt || bounty?.opens_at;
+  const opensMs = opensRaw ? Date.parse(opensRaw) : NaN;
 
-  if (Number.isFinite(opensMs) && opensMs > nowMs) {
+  if (status === 'upcoming' || status === 'scheduled' || (Number.isFinite(opensMs) && opensMs > nowMs)) {
     return { key: 'upcoming', label: 'Opens soon', takingEntries: false };
   }
   if (status === 'open' && (!Number.isFinite(deadlineMs) || deadlineMs > nowMs) && bounty?.acceptingSubmissions !== false) {
