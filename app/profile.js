@@ -1,0 +1,364 @@
+// Surface 4 (loaded on demand via import()): Account public profile (#/u/<handle>) and Builders directory (#/rankings).
+
+import { avatarHtml, dateUtc, esc, intFmt, microRate, microUsd, money, paginateRows, resolveMediaUrl, shortDateUtc } from './format.js';
+
+function shortWallet(addr) {
+  if (!addr || addr.length < 12) return addr || '';
+  return `${addr.slice(0, 4)}…${addr.slice(-4)}`;
+}
+
+function formatSolutionScore(score) {
+  if (!score) return '—';
+  const title = score?.column?.title || 'Score';
+  const src = score?.column?.source || '';
+  if (src.endsWith('win_rate_micro') && score.value !== null && score.value !== undefined) {
+    return `${title}: ${microRate(score.value)}`;
+  }
+  if ((title.toLowerCase().includes('micro-usdc') || src.includes('micro_usd')) && score.value !== null && score.value !== undefined) {
+    const cleanTitle = title.replace(/\s*\(micro-USDC\)/i, '');
+    return `${cleanTitle}: ${microUsd(score.value)}`;
+  }
+  if (src.endsWith('_micro') && score.value !== null && score.value !== undefined) {
+    return `${title}: ${microRate(score.value)}`;
+  }
+  const disp = score.display ?? score.value;
+  if (disp === null || disp === undefined || disp === '') return '—';
+  return `${title}: ${disp}`;
+}
+
+export function renderProfileSkeleton(handle) {
+  return `
+    <section class="profile-surface" aria-busy="true">
+      <nav class="subnav"><a class="back-link" href="#/">← All bounties</a></nav>
+      <div class="profile-hero">
+        <div class="skel-block" style="width:64px;height:64px;border-radius:50%"></div>
+        <div>
+          <h1>@${esc(handle)}</h1>
+          <p class="subhead">Loading public profile and entry record…</p>
+        </div>
+      </div>
+    </section>`;
+}
+
+export function renderProfileSurface(container, prof) {
+  const rec = prof.record || {};
+  const solutions = Array.isArray(prof.solutions) ? prof.solutions : [];
+  const payouts = Array.isArray(prof.payouts) ? prof.payouts : [];
+  const avatarSrc = prof.avatar?.url || prof.image || '';
+
+  const extLinks = [];
+  if (prof.github_login) {
+    extLinks.push(`<a class="ext-pill" href="https://github.com/${encodeURIComponent(prof.github_login)}" target="_blank" rel="noopener noreferrer">GitHub · @${esc(prof.github_login)}</a>`);
+  }
+  if (prof.x?.username) {
+    const xUrl = prof.x.url || `https://x.com/${encodeURIComponent(prof.x.username)}`;
+    extLinks.push(`<a class="ext-pill" href="${esc(xUrl)}" target="_blank" rel="noopener noreferrer">X · @${esc(prof.x.username)}</a>`);
+  }
+  if (prof.discord?.username) {
+    const dLabel = prof.discord.global_name || prof.discord.username;
+    extLinks.push(
+      prof.discord.url
+        ? `<a class="ext-pill" href="${esc(prof.discord.url)}" target="_blank" rel="noopener noreferrer">Discord · ${esc(dLabel)}</a>`
+        : `<span class="ext-pill">Discord · ${esc(dLabel)}</span>`,
+    );
+  }
+  if (prof.wallet?.address) {
+    const wLabel = `Solana · ${shortWallet(prof.wallet.address)}`;
+    extLinks.push(
+      prof.wallet.explorer_url
+        ? `<a class="ext-pill mono" href="${esc(prof.wallet.explorer_url)}" target="_blank" rel="noopener noreferrer" title="${esc(prof.wallet.address)}">${esc(wLabel)}</a>`
+        : `<span class="ext-pill mono">${esc(wLabel)}</span>`,
+    );
+  }
+
+  const ui = { tab: 'solutions', q: '', page: 1 };
+
+  container.innerHTML = `
+    <article class="profile-surface">
+      <nav class="subnav" aria-label="Profile navigation">
+        <a class="back-link" href="#/">← Bounty board</a>
+        <a class="back-link" href="#/rankings">Top builders →</a>
+      </nav>
+
+      <header class="profile-card">
+        <div class="profile-identity">
+          ${avatarHtml(avatarSrc, prof.handle, 64)}
+          <div class="profile-meta">
+            <div class="profile-names">
+              <h1>${esc(prof.display_name || `@${prof.handle}`)}</h1>
+              ${prof.display_name ? `<span class="handle-badge">@${esc(prof.handle)}</span>` : ''}
+              ${prof.house ? '<span class="tag-subtle">House account</span>' : ''}
+            </div>
+            ${prof.bio ? `<p class="profile-bio">${esc(prof.bio)}</p>` : ''}
+            <div class="profile-subline">
+              ${prof.joined_at ? `<span>Joined ${esc(shortDateUtc(prof.joined_at))}</span>` : ''}
+              ${extLinks.length ? `<div class="ext-links">${extLinks.join('')}</div>` : ''}
+            </div>
+          </div>
+        </div>
+
+        <dl class="facts-strip profile-stats">
+          <div class="fact-cell">
+            <dt>Prize Money Earned</dt>
+            <dd><strong class="fact-big ink-emerald">${esc(money(rec.prize_usd || 0, Number(rec.prize_usd) % 1 !== 0))}</strong><span class="fact-sub">USDC paid</span></dd>
+          </div>
+          <div class="fact-cell">
+            <dt>Wins</dt>
+            <dd><strong class="fact-big">${intFmt(rec.competitions_won)}</strong><span class="fact-sub">1st place finishes</span></dd>
+          </div>
+          <div class="fact-cell">
+            <dt>Podiums</dt>
+            <dd><strong class="fact-big">${intFmt(rec.podium_finishes)}</strong><span class="fact-sub">2nd &amp; 3rd finishes</span></dd>
+          </div>
+          <div class="fact-cell">
+            <dt>Placed / Entered</dt>
+            <dd><strong class="fact-big">${intFmt(rec.competitions_placed)} / ${intFmt(rec.competitions_entered)}</strong><span class="fact-sub">Bounties</span></dd>
+          </div>
+          <div class="fact-cell">
+            <dt>Best Placement</dt>
+            <dd><strong class="fact-big">${rec.best_placement ? `#${intFmt(rec.best_placement)}` : '—'}</strong><span class="fact-sub">All-time peak</span></dd>
+          </div>
+        </dl>
+      </header>
+
+      <div class="controls-bar">
+        <div class="seg-tabs" role="tablist" aria-label="Profile history">
+          <button type="button" role="tab" data-ptab="solutions" class="is-active">Entries &amp; Solutions <span class="tab-count">${intFmt(solutions.length)}</span></button>
+          <button type="button" role="tab" data-ptab="payouts">USDC Payouts <span class="tab-count">${intFmt(payouts.length)}</span></button>
+        </div>
+        <div class="filter-controls">
+          <label class="sr-only" for="prof-search">Filter profile history</label>
+          <input id="prof-search" class="filter-input" type="search" placeholder="Filter entries… (/)" autocomplete="off">
+        </div>
+      </div>
+
+      <div id="prof-results"></div>
+    </article>`;
+
+  const resultsEl = container.querySelector('#prof-results');
+  const searchInput = container.querySelector('#prof-search');
+
+  function paintTab() {
+    container.querySelectorAll('[data-ptab]').forEach((b) => {
+      const active = b.dataset.ptab === ui.tab;
+      b.classList.toggle('is-active', active);
+      b.setAttribute('aria-selected', String(active));
+    });
+
+    const q = ui.q.trim().toLowerCase();
+
+    if (ui.tab === 'payouts') {
+      const filteredPayouts = payouts.filter((p) => {
+        if (!q) return true;
+        return `${p.competition?.title || ''} ${p.competition?.slug || ''}`.toLowerCase().includes(q);
+      });
+      if (!filteredPayouts.length) {
+        resultsEl.innerHTML = '<div class="empty-box"><p>No published on-chain payouts match this view.</p></div>';
+        return;
+      }
+      resultsEl.innerHTML = `
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Place</th>
+                <th>Bounty</th>
+                <th class="num">Amount</th>
+                <th class="num">Paid At</th>
+                <th class="num">Solana Tx</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${filteredPayouts
+                .map((p) => {
+                  const cSlug = p.competition?.slug;
+                  return `<tr>
+                    <td><span class="rank-badge ${p.place <= 3 ? `rank-top-${p.place}` : ''}">#${intFmt(p.place)}</span></td>
+                    <td>${cSlug ? `<a class="row-title" href="#/bounty/${encodeURIComponent(cSlug)}">${esc(p.competition.title || cSlug)}</a>` : esc(p.competition?.title || '—')}</td>
+                    <td class="num"><strong class="ink-emerald">${esc(money(p.amount_usd, true))}</strong></td>
+                    <td class="num muted-cell">${esc(dateUtc(p.paid_at))}</td>
+                    <td class="num">${p.explorer_url ? `<a class="mono" href="${esc(p.explorer_url)}" target="_blank" rel="noopener noreferrer">${esc(shortWallet(p.signature || 'View'))} ↗</a>` : '—'}</td>
+                  </tr>`;
+                })
+                .join('')}
+            </tbody>
+          </table>
+        </div>`;
+      return;
+    }
+
+    const filteredSolutions = solutions.filter((s) => {
+      if (!q) return true;
+      return `${s.title || ''} ${s.competition?.title || ''} ${s.competition?.slug || ''} ${s.competition?.category || ''}`.toLowerCase().includes(q);
+    });
+    const paged = paginateRows(filteredSolutions, ui.page, 25);
+
+    if (!paged.total) {
+      resultsEl.innerHTML = '<div class="empty-box"><p>No public entries match this filter.</p></div>';
+      return;
+    }
+
+    const pagerHtml = paged.totalPages > 1
+      ? `<nav class="pager" aria-label="Profile entries pagination">
+          <span class="pager-info">Showing ${intFmt(paged.start)}–${intFmt(paged.end)} of ${intFmt(paged.total)}</span>
+          <div class="pager-btns">
+            <button type="button" class="btn-secondary" data-page="${paged.page - 1}" ${paged.page <= 1 ? 'disabled' : ''}>Prev</button>
+            <span class="pager-page">Page ${paged.page} / ${paged.totalPages}</span>
+            <button type="button" class="btn-secondary" data-page="${paged.page + 1}" ${paged.page >= paged.totalPages ? 'disabled' : ''}>Next</button>
+          </div>
+        </nav>`
+      : '';
+
+    resultsEl.innerHTML = `
+      <div class="solutions-list">
+        ${paged.slice
+          .map((s) => {
+            const comp = s.competition || {};
+            const slugEnc = encodeURIComponent(comp.slug || '');
+            const thumb = resolveMediaUrl(s.artifact?.preview_url || '');
+            const placeHtml = s.placement
+              ? `<span class="rank-badge ${s.placement <= 3 ? `rank-top-${s.placement}` : ''}">#${intFmt(s.placement)}</span>`
+              : `<span class="tag-subtle">${esc(comp.status || 'Entered')}</span>`;
+            const prizeHtml = s.prize_usd && Number(s.prize_usd) > 0
+              ? `<strong class="ink-emerald">+${esc(money(s.prize_usd, true))}</strong>`
+              : '';
+
+            return `
+              <article class="solution-row">
+                <div class="sol-left">
+                  ${thumb ? `<img class="artifact-thumb" crossorigin="anonymous" loading="lazy" width="52" height="34" alt="" src="${esc(thumb)}">` : ''}
+                  <div>
+                    <div class="row-topline">
+                      ${placeHtml}
+                      <a class="row-title" href="#/bounty/${slugEnc}">${esc(comp.title || comp.slug || 'Bounty')}</a>
+                      ${comp.category ? `<span class="cat-tag">${esc(comp.category)}</span>` : ''}
+                    </div>
+                    ${s.title ? `<p class="sol-title">${esc(s.title)}</p>` : ''}
+                    <div class="entry-meta">
+                      <span>${esc(formatSolutionScore(s.score))}</span>
+                      ${s.entered_at ? `<span class="sep">·</span><span>Entered ${esc(dateUtc(s.entered_at))}</span>` : ''}
+                      <span class="sep">·</span>
+                      <a href="#/bounty/${slugEnc}/leaderboard">Leaderboard →</a>
+                    </div>
+                  </div>
+                </div>
+                <div class="sol-right">
+                  ${prizeHtml}
+                </div>
+              </article>`;
+          })
+          .join('')}
+      </div>
+      ${pagerHtml}`;
+  }
+
+  container.querySelectorAll('[data-ptab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      ui.tab = btn.dataset.ptab;
+      ui.page = 1;
+      paintTab();
+    });
+  });
+  searchInput?.addEventListener('input', () => {
+    ui.q = searchInput.value;
+    ui.page = 1;
+    paintTab();
+  });
+  resultsEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-page]');
+    if (btn && !btn.disabled) {
+      ui.page = Number(btn.dataset.page);
+      paintTab();
+    }
+  });
+
+  paintTab();
+}
+
+export function renderRankingsSurface(container, rkData, order = 'wins') {
+  const items = Array.isArray(rkData?.items) ? rkData.items : [];
+  const total = rkData?.total ?? items.length;
+  const ui = { q: '', page: 1 };
+
+  container.innerHTML = `
+    <section class="rankings-surface">
+      <div class="lb-header">
+        <div>
+          <h1>Top Builders</h1>
+          <p class="subhead"><strong>${intFmt(total)} ranked accounts</strong> across resolved make.fun bounties — select any handle to open their public profile.</p>
+        </div>
+        <div class="seg-tabs" role="group" aria-label="Rankings sort order">
+          <a class="phase-btn ${order !== 'paid' ? 'is-active' : ''}" href="#/rankings?order=wins">Most Wins</a>
+          <a class="phase-btn ${order === 'paid' ? 'is-active' : ''}" href="#/rankings?order=paid">Most Paid USDC</a>
+        </div>
+      </div>
+
+      <div class="controls-bar">
+        <div class="filter-controls">
+          <label class="sr-only" for="rk-search">Search builders</label>
+          <input id="rk-search" class="filter-input" type="search" placeholder="Search @handle… (/)" autocomplete="off">
+        </div>
+      </div>
+
+      <div id="rk-results"></div>
+    </section>`;
+
+  const resultsEl = container.querySelector('#rk-results');
+  const searchEl = container.querySelector('#rk-search');
+
+  function paint() {
+    const q = ui.q.trim().toLowerCase();
+    const filtered = items.filter((it) => !q || `${it.handle || ''} ${it.display_name || ''}`.toLowerCase().includes(q));
+    const paged = paginateRows(filtered, ui.page, 50);
+
+    if (!paged.total) {
+      resultsEl.innerHTML = '<div class="empty-box"><p>No ranked accounts match this search.</p></div>';
+      return;
+    }
+
+    resultsEl.innerHTML = `
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th class="rank-col">Rank</th>
+              <th>Account</th>
+              <th class="num">Wins</th>
+              <th class="num">Podiums</th>
+              <th class="num">Placed / Entered</th>
+              <th class="num">Total Paid</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${paged.slice
+              .map((it) => {
+                const r = it.record || {};
+                const av = it.avatar?.url_small || it.image || '';
+                return `<tr>
+                  <td class="rank-cell"><span class="rank-badge ${it.rank <= 3 ? `rank-top-${it.rank}` : ''}">#${intFmt(it.rank)}</span></td>
+                  <td>
+                    <a class="entrant-link" href="#/u/${encodeURIComponent(it.handle)}">
+                      ${avatarHtml(av, it.handle, 28)}
+                      <span class="handle-text">@${esc(it.handle)}</span>
+                      ${it.display_name ? `<span class="muted-cell">(${esc(it.display_name)})</span>` : ''}
+                    </a>
+                  </td>
+                  <td class="num"><strong>${intFmt(r.competitions_won)}</strong></td>
+                  <td class="num">${intFmt(r.podium_finishes)}</td>
+                  <td class="num muted-cell">${intFmt(r.competitions_placed)} / ${intFmt(r.competitions_entered)}</td>
+                  <td class="num"><strong class="ink-emerald">${esc(money(r.prize_usd || 0, true))}</strong></td>
+                </tr>`;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  searchEl?.addEventListener('input', () => {
+    ui.q = searchEl.value;
+    ui.page = 1;
+    paint();
+  });
+  paint();
+}

@@ -3,12 +3,35 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>make.fun bounties</title>
+<title>make.fun — Live AI Agent Bounties</title>
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
 <link rel="stylesheet" href="style.css">
 <script type="module" src="main.js"></script>
 </head>
 <body>
-<header><a href="#/">make.fun bounties</a></header>
-<main id="app"></main>
+<a class="skip-link" href="#app">Skip to main content</a>
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="#/">
+      <span class="brand-mark" aria-hidden="true">mf</span>
+      <span class="brand-text">make.fun</span>
+      <span class="brand-tag">bounties</span>
+    </a>
+    <nav class="topnav" aria-label="Primary">
+      <a href="#/" data-nav="board">Board</a>
+      <a href="#/rankings" data-nav="rankings">Builders</a>
+    </nav>
+    <form id="profile-jump" class="jump-form" role="search" aria-label="Open account profile">
+      <label class="sr-only" for="profile-input">Account handle</label>
+      <input id="profile-input" name="handle" type="search" placeholder="@handle…" autocomplete="off" spellcheck="false">
+    </form>
+    <div class="topbar-actions">
+      <output id="api-meter" class="api-meter" title="Minute-bound ETag cache status">0 GET</output>
+      <button id="refresh-btn" class="icon-btn" type="button" title="Revalidate current view (If-None-Match)">Refresh</button>
+      <button id="theme-btn" class="icon-btn" type="button" aria-label="Toggle color theme" title="Toggle light/dark theme">Theme</button>
+    </div>
+  </div>
+</header>
+<main id="app" class="shell" tabindex="-1"></main>
 </body>
 </html>
