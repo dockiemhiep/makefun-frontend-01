@@ -1,5 +1,20 @@
 [
-  { "file": "1-board.jpg", "path": "#/", "viewport": { "width": 1280, "height": 900 } },
-  { "file": "2-bounty.jpg", "path": "#/bounty/makefun-frontend-01", "viewport": { "width": 1280, "height": 900 } },
-  { "file": "3-leaderboard.jpg", "path": "#/bounty/makefun-frontend-01/leaderboard", "viewport": { "width": 1280, "height": 900 } }
+  {
+    "file": "1-board.jpg",
+    "path": "#/",
+    "viewport": { "width": 1280, "height": 900 },
+    "shows": "the live bounty board beside the bounty closing next"
+  },
+  {
+    "file": "2-bounty.jpg",
+    "path": "#/bounty/makefun-frontend-01",
+    "viewport": { "width": 1280, "height": 900 },
+    "shows": "a bounty page: live pot, entry fee, time left, rewards table, dates"
+  },
+  {
+    "file": "3-leaderboard.jpg",
+    "path": "#/bounty/makefun-frontend-01/leaderboard",
+    "viewport": { "width": 1280, "height": 900 },
+    "shows": "that bounty's leaderboard, linking each builder to a public profile"
+  }
 ]

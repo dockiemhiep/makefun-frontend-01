@@ -33,6 +33,12 @@ const MIME: Record<string, string> = {
 };
 
 const server = createServer((request, response) => {
+  // The app only ever reads, and so does its server: anything but GET or HEAD is turned away.
+  const reading = request.method === 'GET' || request.method === 'HEAD';
+  if (!reading) {
+    response.writeHead(405, { allow: 'GET, HEAD' }).end('read-only');
+    return;
+  }
   const url = new URL(request.url ?? '/', 'http://localhost');
   let pathname: string;
   try {
@@ -60,7 +66,12 @@ const server = createServer((request, response) => {
     'content-type': MIME[extname(file).toLowerCase()] ?? 'application/octet-stream',
     'content-length': size,
     'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
   });
+  if (request.method === 'HEAD') {
+    response.end();
+    return;
+  }
   createReadStream(file).pipe(response);
 }).listen(port, '127.0.0.1', () => {
   const address = server.address();

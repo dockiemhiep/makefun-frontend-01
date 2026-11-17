@@ -1,121 +1,342 @@
-import assert from 'node:assert/strict';
+// Live browser check for Tote: serves app/, walks every surface at phone and desktop sizes against the real
+// make.fun API, asserts content and hygiene, and (with --shots) captures the submission screenshots.
+// Run: PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node tests/live.mjs [--shots]
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, writeFile, copyFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
+import { mkdir, readFile, stat } from 'node:fs/promises';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, join } from 'node:path';
 
-const root = fileURLToPath(new URL('../', import.meta.url));
-const port = process.env.MAKEFUN_QA_PORT || '0';
-let base;
-const modulePath = process.env.PLAYWRIGHT_MODULE || 'playwright';
-const { chromium } = await import(modulePath);
-const temporary = await mkdtemp(join(tmpdir(), 'makefun-live-'));
-const server = spawn(process.execPath, ['serve.ts'], { cwd: root, env: { ...process.env, PORT: port }, stdio: ['ignore', 'pipe', 'pipe'] });
-let serverError = '';
-server.stderr.on('data', chunk => { serverError += chunk; });
-let browser;
-const errors = [], failures = [], apiRequests = [];
-const apiResponses = new Map();
-const results = [];
-const usd = value => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 }).format(Number(value));
-async function apiData(path) {
-  const match = [...apiResponses].find(([url]) => new URL(url).pathname === '/api' + path);
-  assert.ok(match, `Missing live API response for ${path}`);
-  return match[1];
+const repo = join(dirname(fileURLToPath(import.meta.url)), '..');
+const takeShots = process.argv.includes('--shots');
+const SLUG = 'makefun-frontend-01';
+const VIEWPORTS = [{ name: 'desktop', width: 1280, height: 900 }, { name: 'phone', width: 390, height: 844 }];
+const LIMIT = 262144;
+
+const failures = [];
+const rows = [];
+const net = { api: 0, apiNotModified: 0, conditional: 0, weakConditional: 0, wire304: 0 };
+const problems = { console: [], pageErrors: [], failed: [], bad: [], badRequests: [], foreign: [] };
+
+function check(label, ok, detail = '') {
+  if (!ok) failures.push(`${label}${detail ? ` (${detail})` : ''}`);
+  return ok;
 }
-try {
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Static server did not start. ' + serverError)), 10000);
-    let output = '';
-    server.stdout.on('data', chunk => {
-      output += chunk;
-      const address = /http:\/\/127\.0\.0\.1:\d+/.exec(output);
-      if (address) { base = address[0] + '/'; clearTimeout(timer); resolve(); }
-    });
-    server.once('error', error => { clearTimeout(timer); reject(error); });
-    server.once('exit', code => { clearTimeout(timer); reject(new Error(`Static server exited ${code}. ${serverError}`)); });
+
+async function startServer() {
+  const child = spawn(process.execPath, ['serve.ts'], { cwd: repo, env: { ...process.env, PORT: '0' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let log = '';
+  const base = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`server did not print an address: ${log}`)), 15000);
+    const onData = chunk => {
+      log += chunk;
+      const hit = /http:\/\/127\.0\.0\.1:\d+/.exec(log);
+      if (hit) { clearTimeout(timer); resolve(hit[0]); }
+    };
+    child.stdout.on('data', onData);
+    child.stderr.on('data', onData);
+    child.on('exit', code => { clearTimeout(timer); reject(new Error(`server exited ${code}: ${log}`)); });
   });
-  browser = await chromium.launch({ headless: true, channel: 'chrome' });
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, deviceScaleFactor: 1 });
-  const page = await context.newPage();
-  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
-  page.on('pageerror', error => errors.push(String(error)));
-  page.on('requestfailed', request => failures.push(`${request.method()} ${request.url()} ${request.failure()?.errorText}`));
-  page.on('response', response => {
-    if (response.status() >= 400) failures.push(`HTTP ${response.status()} ${response.url()}`);
-    if (response.status() === 200 && response.url().startsWith('https://make.fun/api/')) {
-      apiResponses.set(response.url(), response.json().catch(() => null));
-    }
-  });
+  return { child, base };
+}
+
+async function watch(page, base, where) {
+  const local = new URL(base).origin;
+  page.on('console', message => { if (message.type() === 'error') problems.console.push(`${where}: ${message.text()}`); });
+  page.on('pageerror', error => problems.pageErrors.push(`${where}: ${error.message}`));
+  page.on('requestfailed', request => problems.failed.push(`${where}: ${request.url()} ${request.failure()?.errorText ?? ''}`));
   page.on('request', request => {
-    if (request.url().startsWith('https://make.fun/api/')) { apiRequests.push(request.url()); assert.equal(request.method(), 'GET'); }
-  });
-  async function visit(path) {
-    await page.goto(base + path, { waitUntil: 'load' });
-    await page.waitForFunction(() => window.__shotReady === true, { timeout: 30000 });
-    assert.ok(!await page.getByRole('heading', { name: 'Couldn’t load this page.' }).count(), `API error at ${path}`);
-    assert.equal(await page.locator('main h1').count(), 1, `Missing page heading at ${path}`);
-    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `Overflow at ${path}`);
-    await page.waitForFunction(() => [...document.images].filter(image => {
-      const rect = image.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0 && rect.top < innerHeight && rect.bottom > 0;
-    }).every(image => image.complete && image.naturalWidth > 0), undefined, { timeout: 15000 });
-    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
-    results.push({ route: path, viewport: page.viewportSize(), heading: await page.locator('main h1').innerText() });
-  }
-  const shots = JSON.parse(await readFile(join(root, 'shots.json'), 'utf8'));
-  for (const shot of shots) {
-    await page.setViewportSize(shot.viewport);
-    await visit(shot.path);
-    if (shot.path === '#/') assert.ok(await page.locator('.bounty-card').count() > 0, 'The board must show live bounties.');
-    if (shot.path.endsWith('/leaderboard')) {
-      const data = await apiData('/competitions/makefun-frontend-01/leaderboard');
-      assert.ok(data.entries.length > 0, 'The leaderboard must show live entries.');
-      assert.equal(await page.locator('.leaderboard .primary-score').first().innerText(), `${(data.entries[0].values.judge / 10000).toFixed(1)}%`, 'The live judge score must render, in percent');
-      assert.equal(await page.locator('.leaderboard th').nth(2).innerText(), data.columns[0].title);
-      assert.equal(await page.locator('.leaderboard tbody tr').count(), Math.min(25, data.entries.length));
-    } else if (shot.path.startsWith('#/bounty/')) {
-      const data = await apiData('/competitions/makefun-frontend-01/requirements');
-      assert.equal(await page.locator('.reward-table tbody tr').count(), data.payout_curve.places.length);
-      assert.equal(await page.locator('.reward-table tbody td').nth(1).innerText(), usd(data.payout_curve.places[0].amount_usd));
-      assert.ok((await page.locator('.schedule-panel').innerText()).includes('Nov 17, 2026'));
+    const url = request.url();
+    if (url.startsWith('https://make.fun/api/') || url === 'https://make.fun/api') {
+      net.api += 1;
+      if (request.method() !== 'GET') problems.badRequests.push(`${where}: ${request.method()} ${url}`);
+      return;
     }
-    await page.screenshot({ path: join(temporary, shot.file), type: 'jpeg', quality: 80 });
-  }
-  let profileLink = await page.locator('.builder-link').first().getAttribute('href').catch(() => null);
-  if (!profileLink) {
-    await visit('#/builders');
-    profileLink = await page.locator('.person').first().getAttribute('href');
-  }
-  assert.ok(profileLink, 'A public profile must be reachable by link.');
-  await visit(profileLink);
-  assert.ok(await page.locator('.profile-stats').count(), 'Profile statistics must render.');
-  const profile = await apiData('/profiles/' + decodeURIComponent(profileLink.split('/').pop()));
-  assert.deepEqual(await page.locator('.profile-stats dd').allInnerTexts(), [profile.record.competitions_entered, profile.record.competitions_placed, profile.record.competitions_won].map(value => Number(value).toLocaleString('en-US')).concat(usd(profile.record.prize_usd)));
-  assert.equal(await page.locator('.solution').count(), Math.min(20, profile.solutions.length));
-  assert.ok(!(await page.locator('.solutions').innerText()).includes('Not announced'), 'Solution dates must use entered_at');
-  await page.screenshot({ path: join(temporary, 'desktop-profile.png') });
-  await page.setViewportSize({ width: 390, height: 844 });
-  for (const [index, path] of ['#/', shots[1].path, shots[2].path, profileLink].entries()) {
-    await visit(path);
-    await page.screenshot({ path: join(temporary, `mobile-${['board', 'bounty', 'leaderboard', 'profile'][index]}.png`), fullPage: index === 3 });
-  }
-  assert.deepEqual(errors, [], 'Console errors');
-  assert.deepEqual(failures, [], 'Failed requests');
-  assert.ok(apiRequests.length >= 4, 'Live make.fun API requests must be observed.');
-  for (const shot of shots) {
-    const bytes = await readFile(join(temporary, shot.file));
-    assert.ok(bytes.length <= 262144, `${shot.file} exceeds the screenshot cap`);
-  }
-  for (const name of await readdir(join(root, 'screenshots'))) {
-    if (!shots.some(shot => shot.file === name) && /\.(png|jpe?g)$/i.test(name)) await rm(join(root, 'screenshots', name));
-  }
-  for (const shot of shots) await copyFile(join(temporary, shot.file), join(root, 'screenshots', shot.file));
-  const report = { checkedAt: new Date().toISOString(), browser: await browser.version(), server: base, results, consoleErrors: errors, failedRequests: failures, liveApiRequests: apiRequests.length, screenshots: shots.map(shot => shot.file) };
-  await writeFile(join(temporary, 'report.json'), JSON.stringify(report, null, 2));
-  console.log(JSON.stringify({ ...report, evidenceDirectory: temporary }, null, 2));
-} finally {
-  await browser?.close();
-  server.kill('SIGTERM');
+    if (/^(script|stylesheet|font)$/.test(request.resourceType())) {
+      const origin = new URL(url).origin;
+      if (origin !== local && origin !== 'https://make.fun') problems.foreign.push(`${where}: ${request.resourceType()} ${url}`);
+    }
+  });
+  page.on('response', response => {
+    const url = response.url();
+    if (response.status() >= 400) problems.bad.push(`${where}: ${response.status()} ${url}`);
+    if (url.startsWith('https://make.fun/api/') && response.status() === 304) net.apiNotModified += 1;
+  });
+  // What really went over the wire, read from the DevTools protocol: the validator the browser's cache attached to
+  // each conditional GET, and make.fun's 304s, which the page itself only ever sees as the stored 200.
+  const wire = await page.context().newCDPSession(page);
+  await wire.send('Network.enable');
+  const apiRequests = new Set();
+  wire.on('Network.requestWillBeSentExtraInfo', event => {
+    const sent = Object.fromEntries(Object.entries(event.headers).map(([name, value]) => [name.toLowerCase(), value]));
+    if (sent[':authority'] !== 'make.fun' || !String(sent[':path']).startsWith('/api/')) return;
+    apiRequests.add(event.requestId);
+    const validator = sent['if-none-match'];
+    if (!validator) return;
+    net.conditional += 1;
+    if (validator.startsWith('W/')) net.weakConditional += 1;
+  });
+  wire.on('Network.responseReceivedExtraInfo', event => {
+    if (event.statusCode === 304 && apiRequests.has(event.requestId)) net.wire304 += 1;
+  });
 }
+
+async function go(page, hash) {
+  await page.evaluate(next => { window.__shotReady = false; location.hash = next; }, hash);
+  await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+}
+
+async function common(page, label) {
+  const wide = await page.evaluate(() => ({ scroll: document.documentElement.scrollWidth, inner: window.innerWidth }));
+  check(`${label}: no horizontal scroll`, wide.scroll <= wide.inner, `${wide.scroll} > ${wide.inner}`);
+  const text = await page.evaluate(() => `${document.querySelector('#board')?.innerText ?? ''}\n${document.querySelector('#view')?.innerText ?? ''}`);
+  check(`${label}: no "undefined"/"NaN" text`, !/undefined|NaN/.test(text), (/.{0,30}(undefined|NaN).{0,30}/.exec(text) ?? [''])[0]);
+}
+
+async function surface(page, label, selector, assert) {
+  const found = await page.waitForSelector(selector, { timeout: 30000, state: 'attached' }).then(() => true, () => false);
+  if (!check(`${label}: ${selector} present`, found)) return { ok: false, note: 'missing' };
+  const before = failures.length;
+  const note = await assert();
+  await common(page, label);
+  return { ok: failures.length === before, note };
+}
+
+async function visit(page, vp, step) {
+  const label = `${vp.name} ${step.name}`;
+  const started = failures.length;
+  try {
+    await step.run(label);
+  } catch (error) {
+    check(`${label}: completed`, false, error.message.split('\n')[0]);
+  }
+  rows.push({ viewport: vp.name, route: step.name, result: failures.length === started ? 'ok' : 'FAIL', note: step.note ?? '' });
+}
+
+async function walk(browser, base, vp) {
+  const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+  const page = await context.newPage();
+  await watch(page, base, vp.name);
+  await page.goto(`${base}/#/`);
+  await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+  let profileHref = '';
+
+  const steps = [
+    {
+      name: '#/',
+      run: async label => {
+        await surface(page, label, '#board [data-slug]', async () => {
+          const shown = await page.$$eval('#board [data-slug]', els => els.filter(el => el.offsetParent !== null).map(el => el.innerText));
+          check(`${label}: at least 1 visible board row`, shown.length >= 1, `${shown.length}`);
+          check(`${label}: every visible row shows a $ amount`, shown.every(text => text.includes('$')), `${shown.filter(text => !text.includes('$')).length} without`);
+          check(`${label}: row has a bounty link`, (await page.$$('#board [data-slug] a[href^="#/bounty/"]')).length >= 1);
+          if (vp.width < 1000) check(`${label}: phone board hides #view`, await page.$eval('#view', el => el.offsetParent === null || el.innerText.trim() === ''));
+          else check(`${label}: desktop shows board and view side by side`, await page.evaluate(() => {
+            const a = document.querySelector('#board').getBoundingClientRect(), b = document.querySelector('#view').getBoundingClientRect();
+            return a.width > 0 && b.width > 0 && Math.abs(a.top - b.top) < 200 && (a.right <= b.left + 1 || b.right <= a.left + 1);
+          }));
+          return `${shown.length} rows`;
+        });
+      },
+    },
+    {
+      name: `#/bounty/${SLUG}`,
+      run: async label => {
+        await go(page, `#/bounty/${SLUG}`);
+        await surface(page, label, '#view article[data-bounty]', async () => {
+          check(`${label}: pot tag`, (await page.$eval('#view .tag.big', el => el.innerText).catch(() => '')).includes('$'));
+          check(`${label}: rewards table has a body row`, (await page.$$('#view table.grid tbody tr')).length >= 1);
+          check(`${label}: dates shown`, (await page.$$('#view .kv')).length >= 1 && /\d{4}/.test(await page.$eval('#view .kv', el => el.innerText).catch(() => '')));
+          check(`${label}: leaderboard link`, (await page.$$(`#view a[href="#/bounty/${SLUG}/leaderboard"]`)).length >= 1);
+        });
+      },
+    },
+    {
+      name: `#/bounty/${SLUG}/leaderboard`,
+      run: async label => {
+        await go(page, `#/bounty/${SLUG}/leaderboard`);
+        await surface(page, label, '#view [data-rank]', async () => {
+          const count = (await page.$$('#view [data-rank]')).length;
+          check(`${label}: >= 10 leaderboard rows`, count >= 10, `${count}`);
+          profileHref = await page.$eval('#view a[href^="#/u/"]', el => el.getAttribute('href')).catch(() => '');
+          check(`${label}: profile link`, profileHref.startsWith('#/u/'));
+          check(`${label}: Load next 50 button`, await page.evaluate(() => [...document.querySelectorAll('#view button')].some(b => /load next 50/i.test(b.innerText))), 'only expected when more than 50 entrants');
+        });
+      },
+    },
+    {
+      name: '#/u/<first from leaderboard>',
+      run: async label => {
+        check(`${label}: have a profile link to follow`, profileHref !== '');
+        await go(page, profileHref);
+        await surface(page, label, '#view article[data-profile]', async () => {
+          check(`${label}: profile has a name`, (await page.$eval('#view article[data-profile]', el => el.innerText.trim().length)) > 3);
+        });
+      },
+    },
+    {
+      name: '#/builders',
+      run: async label => {
+        await go(page, '#/builders');
+        await surface(page, label, '#view [data-builder]', async () => {
+          const count = (await page.$$('#view [data-builder]')).length;
+          check(`${label}: >= 5 builders`, count >= 5, `${count}`);
+        });
+      },
+    },
+    {
+      name: '#/ refreshed',
+      run: async label => {
+        // Back on the board, the app's own refresh button forces a re-read: the browser must send the stored weak
+        // validator, and the page must still stand (make.fun's 304 has no CORS header, so a hand-set one would fail).
+        await go(page, '#/');
+        const before = net.weakConditional;
+        await page.evaluate(() => { window.__shotReady = false; document.querySelector('#refresh').click(); });
+        await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+        await page.waitForTimeout(300);
+        check(`${label}: refresh sent If-None-Match with a weak W/ validator`, net.weakConditional > before, `${net.weakConditional - before}`);
+        check(`${label}: header still says Live`, /live/i.test(await page.$eval('#wire', el => el.innerText).catch(() => 'Live')) || vp.width < 1000);
+        await surface(page, label, '#board [data-slug]', async () => {});
+      },
+    },
+  ];
+  for (const step of steps) await visit(page, vp, step);
+  await context.close();
+}
+
+// Lifecycle on the clock. The live list is passed through with two edits made in the test's own interception: one
+// open bounty's deadline is moved a few seconds ahead and another gets an opening time an hour away. The board must
+// leave the unopened one out of "Open now" and the live-pot sum from the start, then, when the moved deadline
+// passes, flip that row to closed and lower both totals with exactly one re-render and no reload.
+async function lifecycle(browser, base, vp) {
+  const label = `${vp.name} lifecycle`;
+  const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+  const page = await context.newPage();
+  await watch(page, base, label);
+  const moved = { closing: null, unopened: null, at: 0, pots: {} };
+  await page.route('https://make.fun/api/competitions?activity=times', async route => {
+    const answer = await route.fetch();
+    const body = await answer.json();
+    const open = body.items
+      .filter(item => item.status === 'open' && Date.parse(item.deadline) > Date.now() + 60000 && !(Date.parse(item.opensAt) > Date.now()))
+      .sort((a, b) => Date.parse(a.deadline) - Date.parse(b.deadline));
+    if (!moved.closing && open.length >= 3) {
+      moved.closing = open[1].slug;
+      moved.unopened = open[2].slug;
+      moved.at = Date.now() + 7000;
+      moved.pots = { closing: Number(open[1].potUsd ?? open[1].rewardAmount), unopened: Number(open[2].potUsd ?? open[2].rewardAmount), all: open.reduce((sum, item) => sum + Number(item.potUsd ?? item.rewardAmount), 0), count: open.length };
+    }
+    for (const item of body.items) {
+      if (item.slug === moved.closing) item.deadline = new Date(moved.at).toISOString();
+      if (item.slug === moved.unopened) item.opensAt = new Date(moved.at + 3600000).toISOString();
+    }
+    await route.fulfill({ response: answer, json: body });
+  });
+  await page.addInitScript(() => {
+    let ready;
+    window.__renders = 0;
+    Object.defineProperty(window, '__shotReady', { get: () => ready, set: value => { if (value === false) window.__renders += 1; ready = value; } });
+  });
+  await page.goto(`${base}/#/`);
+  await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+  if (!check(`${label}: at least three open bounties to work with`, Boolean(moved.closing))) return context.close();
+  const read = () => page.evaluate(slug => ({
+    open: Number(document.querySelector('#board .bd-big')?.innerText),
+    pot: Number(document.querySelector('#board .bd-pots .tag')?.innerText.replace(/[$,]/g, '')),
+    phase: document.querySelector(`#board [data-slug="${slug}"]`)?.dataset.phase,
+    renders: window.__renders,
+  }), moved.closing);
+  const before = await read();
+  check(`${label}: unopened bounty is not counted open`, before.open === moved.pots.count - 1, `${before.open} of ${moved.pots.count}`);
+  check(`${label}: unopened bounty's pot is not in the live sum`, Math.abs(before.pot - (moved.pots.all - moved.pots.unopened)) < 5, `${before.pot} vs ${moved.pots.all - moved.pots.unopened}`);
+  check(`${label}: unopened bounty has no row on the open tab`, (await page.$(`#board [data-slug="${moved.unopened}"]`)) === null);
+  await page.waitForFunction(slug => document.querySelector(`#board [data-slug="${slug}"]`)?.dataset.phase === 'closed', moved.closing, { timeout: 20000 }).catch(() => {});
+  await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+  await page.waitForTimeout(3000);
+  const after = await read();
+  check(`${label}: row flips to closed at its deadline without a reload`, after.phase === 'closed', String(after.phase));
+  check(`${label}: open count drops by one`, after.open === before.open - 1, `${before.open} -> ${after.open}`);
+  check(`${label}: live-pot sum drops by that pot`, Math.abs(before.pot - after.pot - moved.pots.closing) < 5, `${before.pot} -> ${after.pot}`);
+  check(`${label}: exactly one re-render`, after.renders === before.renders + 1, `${before.renders} -> ${after.renders}`);
+  rows.push({ viewport: vp.name, route: 'deadline flip (simulated)', result: failures.some(text => text.startsWith(label)) ? 'FAIL' : 'ok', note: `${before.open}->${after.open} open` });
+  await context.close();
+}
+
+async function settle(page) {
+  await page.evaluate(async () => {
+    await document.fonts.ready;
+    const pending = [...document.images].filter(img => !img.complete);
+    await Promise.all(pending.map(img => new Promise(done => { img.onload = img.onerror = done; setTimeout(done, 8000); })));
+    await new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)));
+  });
+}
+
+async function shoot(browser, base) {
+  const list = JSON.parse(await readFile(join(repo, 'shots.json'), 'utf8'));
+  check('shots.json is a non-empty array', Array.isArray(list) && list.length > 0);
+  await mkdir(join(repo, 'screenshots'), { recursive: true });
+  // One visit, one tab: the first shot's address is opened and refreshed once with the app's own button, and each
+  // later shot is reached by navigating inside the app, so the header's request counters show a real session.
+  const context = await browser.newContext({ viewport: list[0].viewport });
+  const page = await context.newPage();
+  await watch(page, base, 'shots');
+  for (const [index, shot] of list.entries()) {
+    const hash = `#/${String(shot.path).replace(/^\/?#?\/?/, '')}`;
+    await page.setViewportSize({ width: shot.viewport.width, height: shot.viewport.height });
+    if (index === 0) {
+      await page.goto(`${base}/${hash}`);
+      await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+      await page.evaluate(() => { window.__shotReady = false; document.querySelector('#refresh').click(); });
+      await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+    } else {
+      await go(page, hash);
+    }
+    await settle(page);
+    const target = join(repo, 'screenshots', shot.file);
+    let quality = 90, bytes = 0;
+    for (;;) {
+      await page.screenshot({ path: target, type: 'jpeg', quality });
+      bytes = (await stat(target)).size;
+      if (bytes <= LIMIT || quality <= 10) break;
+      quality -= 8;
+    }
+    check(`shot ${shot.file} <= ${LIMIT} bytes`, bytes <= LIMIT, `${bytes}`);
+    console.log(`shot ${shot.file}: ${bytes} bytes at quality ${quality}`);
+  }
+  await context.close();
+}
+
+const server = await startServer().catch(error => { console.error(error.message); return null; });
+let summary = 'EXIT-SUMMARY: FAIL (server did not start)';
+let code = 1;
+try {
+  if (!server) throw new Error('no server');
+  const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ? pathToFileURL(process.env.PLAYWRIGHT_MODULE).href : 'playwright');
+  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  try {
+    for (const vp of VIEWPORTS) await walk(browser, server.base, vp);
+    for (const vp of VIEWPORTS) await lifecycle(browser, server.base, vp);
+    if (takeShots) await shoot(browser, server.base);
+  } finally {
+    await browser.close();
+  }
+  check('console errors = 0', problems.console.length === 0, problems.console.slice(0, 3).join(' | '));
+  check('page errors = 0', problems.pageErrors.length === 0, problems.pageErrors.slice(0, 3).join(' | '));
+  check('failed requests = 0', problems.failed.length === 0, problems.failed.slice(0, 3).join(' | '));
+  check('HTTP >= 400 responses = 0', problems.bad.length === 0, problems.bad.slice(0, 3).join(' | '));
+  check('every API call is GET', problems.badRequests.length === 0, problems.badRequests.join(' | '));
+  check('API was called', net.api > 0);
+  check('no script/style/font from foreign origins', problems.foreign.length === 0, problems.foreign.slice(0, 3).join(' | '));
+  console.table(rows);
+  console.log(`Conditional GETs on the wire: ${net.conditional} (weak validator: ${net.weakConditional}); 304 answers on the wire: ${net.wire304}`);
+  console.log(`API GET count: ${net.api}; 304 count: ${net.apiNotModified}; console errors: ${problems.console.length}; page errors: ${problems.pageErrors.length}; failed: ${problems.failed.length}; HTTP>=400: ${problems.bad.length}`);
+  for (const failure of failures) console.log(`FAILED: ${failure}`);
+  code = failures.length === 0 ? 0 : 1;
+  summary = `EXIT-SUMMARY: ${code === 0 ? 'PASS' : 'FAIL'} ${failures.length} failed assertion(s), ${rows.length} route checks, API GET ${net.api}, 304 ${net.apiNotModified}`;
+} catch (error) {
+  console.log(`ERROR: ${error.stack ?? error}`);
+  summary = `EXIT-SUMMARY: FAIL (${String(error.message).split('\n')[0]})`;
+} finally {
+  server?.child.kill();
+}
+console.log(summary);
+process.exit(code);

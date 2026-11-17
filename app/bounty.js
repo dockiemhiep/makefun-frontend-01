@@ -1,112 +1,293 @@
-import { get, apiPath, items, nextCursor } from './api.js';
-import { escapeHTML as e, encoded, number, dollars, pot, badge, lifecycle, countdown, date, bountyURL, profileURL, arrow, title, empty, paging, markdown, avatar } from './ui.js';
-
-const PAGE_SIZE = 25;
-function tabs(slug, standings) {
-  return `<nav class="surface-tabs" aria-label="Bounty pages"><a href="${bountyURL(slug)}" ${!standings ? 'aria-current="page"' : ''}>Overview</a><a href="${bountyURL(slug)}/leaderboard" ${standings ? 'aria-current="page"' : ''}>Leaderboard</a></nav>`;
-}
-function heading(bounty, standings) {
-  return `<a class="back-link" href="#/">← All bounties</a><section class="bounty-heading"><div><div class="heading-meta"><span class="category">${e(bounty.category?.name ?? bounty.category ?? 'Code')}</span>${badge(bounty)}</div><h1>${e(bounty.title)}</h1><p>${e(bounty.summary || '')}</p></div><div class="heading-pot"><span>Live prize pot <span class="currency">USDC</span></span><strong>${dollars(pot(bounty))}</strong><span>${Number(bounty.entryFeeUsd) > 0 ? `${dollars(bounty.entryFeeUsd, true)} entry fee` : 'Free to enter'}<span class="dot-separator">/</span>${number(bounty.submissionCount)} entries</span></div></section>${tabs(bounty.slug, standings)}`;
-}
-function rewards(requirements, bounty) {
-  let places = requirements.payout_curve?.places ?? bounty.rewardsNow ?? bounty.rewards ?? [];
-  if (!Array.isArray(places)) places = places.places ?? [];
-  if (!places.length) return '<p class="muted">The payout schedule has not been published yet.</p>';
-  return `<table class="reward-table"><caption class="sr-only">Current rewards by place, including entry-fee shares</caption><thead><tr><th scope="col">Place</th><th scope="col">Reward</th></tr></thead><tbody>${places.map((reward, index) => `<tr><td><span class="place ${index < 3 ? 'top-place' : ''}">${e(reward.place ?? reward.rank ?? index + 1)}</span>${index === 0 ? '<span class="first-label">First place</span>' : ''}</td><td>${dollars(reward.amount_usd ?? reward.amountUsd ?? reward.amount ?? reward.rewardUsd, true)}</td></tr>`).join('')}</tbody></table>`;
-}
-function checks(requirements) {
-  const rules = (requirements.checks ?? []).filter(check => check.applies);
-  return rules.length ? `<section class="rules-section"><div class="section-title"><h2>Rules & checks</h2><span>${rules.length} published checks</span></div>${rules.map(rule => `<details class="rule"><summary>${e(rule.check.replaceAll('_', ' '))}<span>+</span></summary><div class="prose">${markdown(rule.description)}${rule.fix ? `<h3>How to meet it</h3>${markdown(rule.fix)}` : ''}</div></details>`).join('')}</section>` : '';
+export async function renderBounty(ctx, slug, { peek = false } = {}) {
+  const { bounty, requirements, standings } = await loadBounty(ctx, slug);
+  if (!ctx.alive()) return;
+  noteLive(bounty.slug ?? slug, { pot: bounty.potUsd, entries: bounty.submissionCount });
+  const sheet = readSheet(bounty, requirements, standings);
+  ctx.el.innerHTML = peek ? peekHTML(sheet) : pageHTML(sheet);
+  if (!peek) setTitle(bounty.title || slug);
 }
 
-export async function renderBounty(ctx, slug, standings = false) {
-  const bounty = await get(`/competitions/${encoded(slug)}?submissions=summary`, { force: ctx.force });
-  if (!ctx.current()) return;
-  title(standings ? `${bounty.title} · Leaderboard` : bounty.title);
-  if (standings) return renderLeaderboard(ctx, bounty);
-  const requirements = await get(`/competitions/${encoded(slug)}/requirements`, { force: ctx.force });
-  if (!ctx.current()) return;
-  const deadlines = requirements.deadlines ?? {};
-  const potNow = requirements.payout_curve?.total_usd ?? pot(bounty);
-  const description = bounty.description || '';
-  const rules = bounty.rules ?? bounty.rulesMarkdown ?? '';
-  ctx.show(`${heading(bounty, false)}<dl class="bounty-dates"><div><dt>Entries open</dt><dd>${date(bounty.opensAt)}</dd></div><div><dt>Entries close</dt><dd>${date(bounty.deadline || deadlines.entries_close)} · ${countdown(bounty)}</dd></div></dl><div class="detail-layout"><div class="detail-main"><section class="task-section"><h2>The challenge</h2><div class="prose">${markdown(description || bounty.summary)}</div></section>${rules ? `<section class="rules-section"><h2>Competition rules</h2><details class="rule"><summary>Read the full competition rules<span>+</span></summary><div class="prose">${markdown(typeof rules === 'string' ? rules : JSON.stringify(rules, null, 2))}</div></details></section>` : ''}${checks(requirements)}</div>
-    <aside class="detail-aside"><section class="prize-panel"><div class="section-title"><h2>The rewards</h2><span>USDC</span></div><div class="prize-total"><span>Current pot</span><strong>${dollars(potNow)}</strong></div><p class="prize-note">${Number(bounty.entryFeeUsd) > 0 ? 'Entry fees grow the pot. Current shares are included below.' : 'Rewards paid to the highest-ranked eligible entries.'}</p>${rewards(requirements, bounty)}</section>
-    <section class="schedule-panel"><h2>The timeline</h2><dl><div><dt>Entries open</dt><dd>${date(bounty.opensAt)}</dd></div><div class="deadline-date"><dt>Entries close</dt><dd>${date(bounty.deadline || deadlines.entries_close)}<br>${countdown(bounty)}</dd></div>${deadlines.final_window_start ? `<div><dt>Final starts</dt><dd>${date(deadlines.final_window_start)}</dd></div>` : ''}${deadlines.result_due ? `<div><dt>Result due</dt><dd>${date(deadlines.result_due)}</dd></div>` : ''}</dl></section><a class="button primary full" href="${bountyURL(slug)}/leaderboard">View leaderboard ${arrow}</a><a class="external-link" href="https://make.fun/bounty/${encoded(slug)}" target="_blank" rel="noopener">Open on make.fun ↗</a></aside></div>`);
-  ctx.announce(`${bounty.title}, ${lifecycle(bounty)}`);
+function rewardsTable(places, { peek = false } = {}) {
+  if (!places.length) return '<p class="b-none">Prizes not announced.</p>';
+  const cents = places.some(place => !Number.isInteger(place.amount));
+  const rows = peek ? places.slice(0, 5).map(place => [place]) : groupPlaces(places);
+  const body = rows.map(group => {
+    const first = group[0], last = group[group.length - 1];
+    const podium = first.place <= 3;
+    const where = group.length > 1 ? `${ordinal(first.place)}–${ordinal(last.place)}` : ordinal(first.place);
+    const prize = podium ? `<span class="tag">${usd(first.amount, cents)}</span>` : `<b>${usd(first.amount, cents)}</b>${group.length > 1 ? ' <small>each</small>' : ''}`;
+    return `<tr${podium ? ' class="podium"' : ''}><th scope="row">${where}${group.length > 1 ? ` <small>${group.length} places</small>` : ''}</th><td class="r">${prize}</td></tr>`;
+  }).join('');
+  const rest = peek && places.length > 5 ? places.slice(5) : [];
+  const more = rest.length ? `<p class="b-more">+${rest.length} more · ${priceSpan(rest, cents)}</p>` : '';
+  return `<table class="grid b-rewards"><thead><tr><th scope="col">Place</th><th scope="col" class="r">Prize</th></tr></thead><tbody>${body}</tbody></table>${more}`;
 }
 
-export function scoreText(value, column = {}) {
-  if (value === null || value === undefined) return '—';
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return String(value);
-  if (/^performance\.judge\.(win_rate|interval_low|interval_high)_micro$/.test(column.source ?? '')) return `${(numeric / 10000).toFixed(1)}%`;
-  const label = `${column.key ?? ''} ${column.title ?? column.label ?? column.name ?? ''}`;
-  if (/percent|rate/i.test(column.format ?? label)) return `${(numeric <= 1 ? numeric * 100 : numeric).toFixed(1)}%`;
-  if (/usd|reward|payout/.test(label)) return dollars(numeric, true);
-  if (Number.isInteger(numeric)) return number(numeric);
-  return numeric.toLocaleString('en-US', { maximumFractionDigits: 3 });
+function datesList(sheet, { clock = true } = {}) {
+  const { bounty, deadlines } = sheet;
+  const finished = bounty.resolvedAt ?? bounty.resolved_at;
+  const rows = [
+    ['Opened', bounty.opensAt ?? bounty.publishedAt],
+    ['Entries close', deadlines.entries_close ?? bounty.deadline],
+    finished ? ['Results posted', finished] : ['Results due', deadlines.result_due],
+  ];
+  return `<dl class="kv b-dates">${rows.map(([name, iso]) => `<dt>${name}</dt><dd>${esc(whenUTC(iso, clock))}</dd>`).join('')}</dl>`;
 }
-function personOf(row) { return row.entrant ?? row.user ?? row.account ?? row.profile ?? row; }
-function valueOf(row, column, index) { return row.values?.[column.key] ?? row.scores?.[column.key] ?? row.values?.[index] ?? row.metrics?.[column.key] ?? row[column.key] ?? null; }
 
-async function renderLeaderboard(ctx, bounty) {
-  const params = ctx.route.searchParams;
-  let phase = params.get('phase') || '';
-  let response = await get(apiPath(`/competitions/${encoded(bounty.slug)}/leaderboard`, { phase }), { force: ctx.force });
-  if (!ctx.current()) return;
-  let rows = items(response);
-  let cursor = nextCursor(response);
-  let page = Math.max(1, Number(params.get('page')) || 1);
-  let query = params.get('q') || '';
-  let busy = false;
-  let columns = (response.columns ?? bounty.leaderboard?.columns ?? []).filter(column => !column.hidden);
-  if (!columns.length) columns = [{ key: 'score', label: 'Score' }];
-  const phases = Array.isArray(bounty.phases) ? bounty.phases : [{ name: 'dev', label: 'Development' }, { name: 'final', label: 'Final' }];
-  ctx.show(`${heading(bounty, true)}<section class="standings"><div class="standings-heading"><div><p class="eyebrow">The people behind the work</p><h2>On the leaderboard.</h2></div><span class="board-note">${response.phase?.finalized_at ? 'Final standings' : 'Live standings'}</span></div><div class="toolbar"><label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg><span class="sr-only">Search entries</span><input type="search" placeholder="Search an entry or @builder" value="${e(query)}" autocomplete="off"></label><label class="select phase"><span class="sr-only">Competition phase</span><select id="phase"><option value="">Current phase</option>${phases.map(item => { const key = item.key ?? item.id ?? item.name; return `<option value="${e(key)}">${e(item.title ?? item.label ?? (key === 'dev' ? 'Development' : key === 'final' ? 'Final' : key))}</option>`; }).join('')}</select></label></div><div id="standings-results"></div></section>`);
-  ctx.el.querySelector('#phase').value = phase;
-  function matches() {
-    const needle = query.toLowerCase().replace(/^@/, '');
-    return rows.filter(row => { const user = personOf(row); return `${row.title ?? row.name ?? ''} ${user.handle ?? ''} ${user.displayName ?? ''}`.toLowerCase().includes(needle); });
+function topStandings(sheet, limit = 5, { titles = true } = {}) {
+  const { standings, score, paid, slug } = sheet;
+  const rows = standings.rows.slice(0, limit);
+  if (!rows.length) return `<p class="b-none">${standings.failed ? 'Standings did not load.' : 'No ranked entries yet.'}</p>`;
+  const body = rows.map(row => {
+    const place = Number(row.prize_rank ?? row.rank);
+    const top = !(Number.isFinite(place) && place >= 1 && place <= paid) ? '' : place <= 3 ? ' top podium' : ' top';
+    const handle = String(row.handle ?? '');
+    const who = handle
+      ? `<a class="who" href="${hrefProfile(handle)}">${avatarHTML(row, 28)}<span>${esc(handle)}</span></a>`
+      : `<span class="who">${avatarHTML(row, 28)}<span>Anonymous</span></span>`;
+    const entry = titles && row.title ? `<small class="b-entry">${esc(row.title)}</small>` : '';
+    return `<tr><td><span class="rank${top}">${esc(row.rank ?? '—')}</span></td><td class="b-who">${who}${entry}</td><td class="r"><b>${score.format(row)}</b></td></tr>`;
+  }).join('');
+  return `<table class="grid b-top"><thead><tr><th scope="col">#</th><th scope="col">Builder</th><th scope="col" class="r">${esc(score.title)}</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
+import { esc, count, usd, potOf, feeOf, noteLive, phaseOf, whenUTC, statusHTML, countdownHTML, avatarHTML, setTitle, hrefBounty, hrefLeaderboard, hrefProfile, safeLink } from './app.js';
+import { getRevalidated, getPage } from './api.js';
+
+const PHASE_NAMES = { intake: 'When you enter', transcripts: 'Transcripts', grading: 'Grading', claim: 'Claiming a prize', claim_request: 'Claim request' };
+
+async function loadBounty(ctx, slug) {
+  const base = `/competitions/${encodeURIComponent(slug)}`;
+  const options = { force: ctx.force };
+  const [bounty, requirements, standings] = await Promise.all([
+    getRevalidated(`${base}?submissions=summary`, options).catch(failure => {
+      if (failure.status === 404) throw new Error(`make.fun has no bounty called “${slug}”.`);
+      throw failure;
+    }),
+    // The page still stands without rules or standings, so those two fail soft.
+    getRevalidated(`${base}/requirements`, options).catch(() => ({})),
+    getPage(`${base}/leaderboard`, { rows: 'first' }).then(page => ({ rows: page.rows, body: page.body }), () => ({ rows: [], body: {}, failed: true })),
+  ]);
+  if (!bounty || typeof bounty !== 'object') throw new Error('make.fun sent an unreadable bounty.');
+  return { bounty, requirements: requirements ?? {}, standings };
+}
+
+function readSheet(bounty, requirements, standings) {
+  const places = placesOf(bounty, requirements);
+  const ranked = standings.rows.filter(row => !row.house && !row.baseline && row.ranked !== false);
+  return {
+    bounty,
+    slug: bounty.slug ?? '',
+    phase: phaseOf(bounty),
+    fee: feeOf(bounty),
+    places,
+    paid: places.filter(place => place.amount > 0).length,
+    deadlines: requirements.deadlines ?? {},
+    checks: (requirements.checks ?? []).filter(check => check.applies !== false),
+    standings: { ...standings, rows: ranked },
+    score: scoreOf(standings.body ?? {}),
+  };
+}
+
+// The live payout curve already folds each place's share of the entry fees into its prize.
+function placesOf(bounty, requirements) {
+  const curve = requirements.payout_curve?.places;
+  const live = bounty.rewardsNow;
+  let list = [];
+  if (Array.isArray(curve) && curve.length) list = curve.map(item => ({ place: item.place, amount: item.amount_usd }));
+  else if (Array.isArray(live) && live.length) list = live.map(item => ({ place: item.place, amount: item.amountUsd ?? item.baseUsd }));
+  else if (bounty.rewards && typeof bounty.rewards === 'object') list = Object.entries(bounty.rewards).map(([place, amount]) => ({ place, amount }));
+  return list
+    .map(item => ({ place: Number(item.place), amount: Number(item.amount) }))
+    .filter(item => Number.isFinite(item.place) && Number.isFinite(item.amount))
+    .sort((a, b) => a.place - b.place);
+}
+
+function groupPlaces(places) {
+  const groups = [];
+  for (const place of places) {
+    const last = groups[groups.length - 1];
+    if (place.place > 3 && last && last[0].place > 3 && last[0].amount === place.amount && last[last.length - 1].place === place.place - 1) last.push(place);
+    else groups.push([place]);
   }
-  function draw() {
-    if (!ctx.current()) return;
-    const list = matches();
-    if (!cursor) page = Math.min(page, Math.max(1, Math.ceil(list.length / PAGE_SIZE)));
-    const shownColumns = columns.slice(0, 4);
-    ctx.el.querySelector('#standings-results').innerHTML = (list.length ? `<div class="table-wrap"><table class="leaderboard"><caption class="sr-only">${e(bounty.title)} standings</caption><thead><tr><th scope="col">Rank</th><th scope="col">Entry / builder</th>${shownColumns.map((column, index) => `<th scope="col" ${index ? 'class="secondary-score"' : ''}>${e(column.title ?? column.label ?? column.name ?? column.key)}</th>`).join('')}</tr></thead><tbody>${list.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE).map((row, index) => {
-      const user = personOf(row), handle = user.handle ?? user.username;
-      const rank = row.rank ?? row.place;
-      const displayRank = rank ?? (page - 1) * PAGE_SIZE + index + 1;
-      return `<tr><td><span class="rank ${Number(displayRank) <= 3 ? 'rank-top' : ''}">${e(displayRank)}</span></td><td><div class="entry-cell">${avatar(user)}<div><strong>${e(row.title ?? row.name ?? row.submission?.title ?? 'Untitled entry')}</strong>${handle ? `<a class="builder-link" href="${profileURL(handle)}">@${e(handle)}</a>` : '<span class="muted">Entrant withheld</span>'}${row.status && !['scored', 'graded', 'complete', 'finished'].includes(row.status) ? `<span class="entry-state">${e(row.status.replaceAll('_', ' '))}</span>` : ''}</div></div></td>${shownColumns.map((column, columnIndex) => `<td ${columnIndex ? 'class="secondary-score"' : 'class="primary-score"'}>${e(scoreText(valueOf(row, column, columns.indexOf(column)), column))}</td>`).join('')}</tr>`;
-    }).join('')}</tbody></table></div>` : empty(query ? 'No matching entries.' : response.phase?.scores_visible === false ? 'Standings are not public yet.' : 'The leaderboard is warming up.', query ? 'Try a builder’s handle or another entry title.' : response.phase?.scores_visible === false ? 'This phase’s scores will appear when make.fun publishes them.' : 'Scored entries will appear here as make.fun publishes them.')) + paging(page, list.length, PAGE_SIZE, Boolean(cursor));
-    const state = new URLSearchParams();
-    if (phase) state.set('phase', phase);
-    if (query) state.set('q', query);
-    if (page > 1) state.set('page', page);
-    ctx.replace(state);
+  return groups;
+}
+
+function priceSpan(places, cents) {
+  const amounts = places.map(place => place.amount);
+  const low = Math.min(...amounts), high = Math.max(...amounts);
+  return low === high ? `${usd(low, cents)} each` : `${usd(low, cents)}–${usd(high, cents)}`;
+}
+
+function ordinal(n) {
+  const tens = n % 100;
+  const tail = tens >= 11 && tens <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th';
+  return `${n}${tail}`;
+}
+
+// Judge win rates arrive in millionths; any other ranking value shows as a plain number.
+function scoreOf(board) {
+  const key = board.rank_key ?? 'judge';
+  const column = (board.columns ?? []).find(item => item.key === key) ?? {};
+  const micro = /_micro$/.test(column.source ?? '');
+  const title = String(column.title ?? 'Score').replace(/^Judge\s+/i, '');
+  return {
+    title: title.charAt(0).toUpperCase() + title.slice(1),
+    format(row) {
+      const value = Number(row.values?.[key]);
+      if (row.values?.[key] === null || row.values?.[key] === undefined || !Number.isFinite(value)) return '—';
+      return micro ? `${(value / 10000).toFixed(1)}%` : count(value);
+    },
+  };
+}
+
+function potHTML(sheet) {
+  const { bounty, fee, phase } = sheet;
+  const known = bounty.potUsd ?? bounty.rewardAmount;
+  const pot = known === null || known === undefined ? '—' : usd(potOf(bounty));
+  const fees = Number(bounty.entryFeesUsd);
+  const reward = Number(bounty.rewardAmount);
+  const parts = fee > 0 && Number.isFinite(fees) && Number.isFinite(reward)
+    ? `<p class="b-parts">${usd(reward)} reward + ${usd(fees, true)} entry fees</p>`
+    : '';
+  const name = phase === 'open' || phase === 'soon' ? 'Live pot' : phase === 'done' ? 'Final pot' : 'Pot';
+  return `<div class="b-pot"><p class="label">${name}</p><p><span class="tag big">${pot}</span></p>${parts}</div>`;
+}
+
+function statsHTML(sheet, { places = true } = {}) {
+  const { bounty, fee, paid, phase } = sheet;
+  // Once entries shut there is no time left to count, so the cell names the day they closed.
+  const clock = phase === 'closed' || phase === 'done'
+    ? ['Closed', esc(whenUTC(sheet.deadlines.entries_close ?? bounty.deadline, false).replace(`, ${new Date().getUTCFullYear()}`, ''))]
+    : ['Time left', countdownHTML(bounty)];
+  const cells = [
+    ['Entry fee', fee > 0 ? usd(fee, true) : 'Free'],
+    clock,
+    ['Entries', count(bounty.submissionCount)],
+  ];
+  if (places) cells.push(['Places paid', paid ? count(paid) : '—']);
+  return `<dl class="stats b-stats">${cells.map(([name, value]) => `<div class="stat"><dt class="label">${name}</dt><dd><b>${value}</b></dd></div>`).join('')}</dl>`;
+}
+
+function pageHTML(sheet) {
+  const { bounty, slug } = sheet;
+  const category = bounty.category ? `<span class="label">${esc(bounty.category)}</span>` : '';
+  const sponsor = bounty.sponsor?.name ? `<span class="label">by ${esc(bounty.sponsor.name)}</span>` : '';
+  return `<article class="b-page" data-bounty="${esc(slug)}">
+    <header class="b-head">
+      <p class="b-kicker">${statusHTML(bounty)}${category}${sponsor}</p>
+      <h1 class="title">${esc(bounty.title || slug)}</h1>
+      ${bounty.summary ? `<p class="lede">${esc(bounty.summary)}</p>` : ''}
+    </header>
+    <div class="b-money">${potHTML(sheet)}${statsHTML(sheet)}</div>
+    <div class="b-nav">
+      <nav class="tabs" aria-label="Bounty"><a href="${hrefBounty(slug)}" aria-current="page">Overview</a><a href="${hrefLeaderboard(slug)}">Leaderboard</a></nav>
+      <a class="btn primary" href="https://make.fun/bounty/${encodeURIComponent(slug)}" target="_blank" rel="noopener">Enter on make.fun ↗</a>
+    </div>
+    <div class="b-cols">
+      <aside class="b-side" aria-label="Rewards, dates and standings">
+        <section class="b-sec"><h2 class="b-title"><span class="h2">Rewards</span><span class="label">${sheet.paid ? `${count(sheet.paid)} places${sheet.fee > 0 ? ' · fees included' : ' paid'}` : 'Not announced'}</span></h2>${rewardsTable(sheet.places)}</section>
+        <section class="b-sec"><h2 class="b-title"><span class="h2">Dates</span><span class="label">UTC</span></h2>${datesList(sheet)}</section>
+        <section class="b-sec"><h2 class="b-title"><span class="h2">Top 5</span><a class="label" href="${hrefLeaderboard(slug)}">Full leaderboard →</a></h2>${topStandings(sheet)}</section>
+      </aside>
+      <div class="b-main">
+        <section class="b-sec"><h2 class="b-title"><span class="h2">Description</span></h2><div class="prose">${proseHTML(bounty.description || bounty.summary || '') || '<p>No description yet.</p>'}</div></section>
+        ${rulesHTML(sheet)}
+      </div>
+    </div>
+  </article>`;
+}
+
+function peekHTML(sheet) {
+  const { bounty, slug, phase } = sheet;
+  const kicker = phase === 'open' ? 'Closing next' : phase === 'soon' ? 'Opening soon' : 'Featured bounty';
+  return `<article class="b-peek" data-bounty="${esc(slug)}">
+    <header class="b-head">
+      <p class="b-kicker"><span class="label">${kicker}${bounty.category ? ` · ${esc(bounty.category)}` : ''}</span>${statusHTML(bounty)}</p>
+      <h2 class="title"><a href="${hrefBounty(slug)}">${esc(bounty.title || slug)}</a></h2>
+      ${bounty.summary ? `<p class="lede">${esc(bounty.summary)}</p>` : ''}
+    </header>
+    <div class="b-ticket">
+      ${potHTML(sheet)}
+      ${statsHTML(sheet, { places: false })}
+      <div class="b-stub">
+        <section><h3 class="label">Rewards · ${sheet.paid ? `${count(sheet.paid)} paid` : '—'}</h3>${rewardsTable(sheet.places, { peek: true })}</section>
+        <section><h3 class="label">Dates</h3>${datesList(sheet, { clock: false })}</section>
+      </div>
+    </div>
+    <section class="b-podium"><h3 class="label">${phase === 'done' ? 'Final top 3' : 'Top 3 now'} · ${esc(sheet.score.title)}</h3>${topStandings(sheet, 3, { titles: false })}</section>
+    <div class="actions"><a class="btn primary" href="${hrefBounty(slug)}">Bounty page →</a><a class="btn" href="${hrefLeaderboard(slug)}">Leaderboard →</a></div>
+  </article>`;
+}
+
+function rulesHTML(sheet) {
+  const { checks, bounty } = sheet;
+  const phases = new Map();
+  for (const check of checks) {
+    const key = check.phase ?? 'other';
+    if (!phases.has(key)) phases.set(key, []);
+    phases.get(key).push(check);
   }
-  ctx.listen(ctx.el.querySelector('input'), 'input', event => { query = event.target.value; page = 1; draw(); });
-  ctx.listen(ctx.el.querySelector('#phase'), 'change', event => { location.hash = `${bountyURL(bounty.slug)}/leaderboard?phase=${encoded(event.target.value)}`; });
-  ctx.listen(ctx.el, 'click', async event => {
-    const button = event.target.closest('[data-page]');
-    if (!button || busy) return;
-    const requested = Number(button.dataset.page);
-    if (requested > Math.ceil(matches().length / PAGE_SIZE) && cursor) {
-      busy = true; button.disabled = true; button.textContent = 'Loading…';
-      try {
-        const data = await get(apiPath(`/competitions/${encoded(bounty.slug)}/leaderboard`, { phase, cursor }));
-        if (!ctx.current()) return;
-        rows = [...rows, ...items(data)];
-        const next = nextCursor(data); cursor = next === cursor ? null : next;
-      } catch (error) { ctx.problem(error.message); }
-      finally { busy = false; }
+  const groups = [...phases].map(([key, list]) => `<h3 class="label b-phase">${esc(PHASE_NAMES[key] ?? key.replaceAll('_', ' '))} · ${list.length}</h3>${list.map(check => `<details class="b-rule"><summary>${esc(check.title || String(check.check ?? '').replaceAll('_', ' '))}</summary><div class="prose">${check.description ? `<p>${inlineHTML(check.description)}</p>` : ''}${check.fix ? `<p><b>How to meet it:</b> ${inlineHTML(check.fix)}</p>` : ''}</div></details>`).join('')}`).join('');
+  const full = typeof bounty.rules === 'string' && bounty.rules.trim()
+    ? `<details class="b-rule b-full"><summary>Read the full rules text</summary><div class="prose">${proseHTML(bounty.rules)}</div></details>`
+    : '';
+  if (!groups && !full) return '';
+  return `<section class="b-sec"><h2 class="b-title"><span class="h2">Rules</span><span class="label">${checks.length ? `${count(checks.length)} checks` : ''}</span></h2>${checks.length ? '<p class="b-note">Each check is named for the failure it catches; open one to see what it asks for.</p>' : ''}${groups}${full}</section>`;
+}
+
+// A small markdown reader for the API's text: headings, lists, fenced code and paragraphs, escaped throughout.
+function proseHTML(text) {
+  const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+  const out = [];
+  let para = [], list = null, fence = null;
+  const flushPara = () => { if (para.length) out.push(`<p>${inlineHTML(para.join(' '))}</p>`); para = []; };
+  const flushList = () => { if (list) out.push(`<${list.tag}>${list.items.map(item => `<li>${inlineHTML(item)}</li>`).join('')}</${list.tag}>`); list = null; };
+  for (const line of lines) {
+    if (fence) {
+      if (/^\s*```/.test(line)) { out.push(`<pre><code>${esc(fence.join('\n'))}</code></pre>`); fence = null; } else fence.push(line);
+      continue;
     }
-    if (!ctx.current()) return;
-    page = Math.max(1, Math.min(requested, Math.max(1, Math.ceil(matches().length / PAGE_SIZE))));
-    draw(); ctx.announce(`Leaderboard page ${page}`);
-    ctx.el.querySelector('.standings').scrollIntoView({ block: 'start' });
-  });
-  draw();
-  ctx.announce(`${number(rows.length)} leaderboard entries loaded`);
+    if (/^\s*```/.test(line)) { flushPara(); flushList(); fence = []; continue; }
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
+    const bullet = /^\s*[-*+]\s+(.*)$/.exec(line);
+    const numbered = /^\s*\d+[.)]\s+(.*)$/.exec(line);
+    if (heading) {
+      flushPara(); flushList();
+      const level = Math.min(4, heading[1].length + 1);
+      out.push(`<h${level}>${inlineHTML(heading[2])}</h${level}>`);
+    } else if (bullet || numbered) {
+      flushPara();
+      const tag = bullet ? 'ul' : 'ol';
+      if (list?.tag !== tag) { flushList(); list = { tag, items: [] }; }
+      list.items.push((bullet ?? numbered)[1]);
+    } else if (!line.trim()) {
+      flushPara(); flushList();
+    } else if (list && /^\s{2,}\S/.test(line)) {
+      list.items[list.items.length - 1] += ' ' + line.trim();
+    } else {
+      flushList();
+      para.push(line.trim());
+    }
+  }
+  if (fence) out.push(`<pre><code>${esc(fence.join('\n'))}</code></pre>`);
+  flushPara(); flushList();
+  return out.join('');
+}
+
+function inlineHTML(text) {
+  return String(text).split(/(`[^`]+`)/).map((piece, index) => {
+    if (index % 2) return `<code>${esc(piece.slice(1, -1))}</code>`;
+    let html = '', at = 0;
+    const marks = /\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|(https?:\/\/[^\s<>()"']+[^\s<>()"'.,;:!?])/g;
+    for (const hit of piece.matchAll(marks)) {
+      html += esc(piece.slice(at, hit.index));
+      at = hit.index + hit[0].length;
+      if (hit[3]) { html += `<strong>${esc(hit[3])}</strong>`; continue; }
+      const label = hit[1] ?? hit[4];
+      const href = safeLink(hit[2] ?? hit[4]);
+      html += href ? `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(label)}</a>` : esc(label);
+    }
+    return html + esc(piece.slice(at));
+  }).join('');
 }
