@@ -1,6 +1,3 @@
-const ROW_HEIGHT = 36;
-const PAGE_SIZE = 50;
-
 // One bounty's standings as a virtual list: only the rows in view (plus a small buffer) exist in the DOM.
 // First paint reads the light rows=first body (top 10); the whole board (rows=all) is read once, when needed.
 export async function renderLeaderboard(ctx, slug) {
@@ -147,6 +144,8 @@ async function followNextCursor(state, quiet = false) {
   if (state.shown > from && !quiet) ctx.announce(`Ranks ${from + 1} to ${state.shown} loaded`);
 }
 
+const ROW_HEIGHT = 36;
+const PAGE_SIZE = 50;
 const BUFFER = 6;
 const FILLS_PANE = globalThis.matchMedia?.('(min-width: 1000px)') ?? { matches: false };
 const PHONE_ROW = 44;

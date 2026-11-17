@@ -1,8 +1,8 @@
-export async function renderBounty(ctx, slug, { peek = false } = {}) {
-  const { bounty, requirements, standings } = await loadBounty(ctx, slug);
+export async function renderBounty(ctx, slug, peek) {
+  const { bounty, requirements, standings, standIn } = await loadBounty(ctx, slug);
   if (!ctx.alive()) return;
-  noteLive(bounty.slug ?? slug, { pot: bounty.potUsd, entries: bounty.submissionCount });
-  const sheet = readSheet(bounty, requirements, standings);
+  if (!standIn) noteLive(bounty.slug ?? slug, { pot: bounty.potUsd, entries: bounty.submissionCount });
+  const sheet = { ...readSheet(bounty, requirements, standings), standIn };
   ctx.el.innerHTML = peek ? peekHTML(sheet) : pageHTML(sheet);
   if (!peek) setTitle(bounty.title || slug);
 }
@@ -37,7 +37,7 @@ function datesList(sheet, { clock = true } = {}) {
 function topStandings(sheet, limit = 5, { titles = true } = {}) {
   const { standings, score, paid, slug } = sheet;
   const rows = standings.rows.slice(0, limit);
-  if (!rows.length) return `<p class="b-none">${standings.failed ? 'Standings did not load.' : 'No ranked entries yet.'}</p>`;
+  if (!rows.length) return `<p class="b-none">${sheet.standIn ? 'Standings are not posted yet.' : standings.failed ? 'Standings did not load.' : 'No ranked entries yet.'}</p>`;
   const body = rows.map(row => {
     const place = Number(row.prize_rank ?? row.rank);
     const top = !(Number.isFinite(place) && place >= 1 && place <= paid) ? '' : place <= 3 ? ' top podium' : ' top';
@@ -54,22 +54,32 @@ function topStandings(sheet, limit = 5, { titles = true } = {}) {
 import { esc, count, usd, potOf, feeOf, noteLive, phaseOf, whenUTC, statusHTML, countdownHTML, avatarHTML, setTitle, hrefBounty, hrefLeaderboard, hrefProfile, safeLink } from './app.js';
 import { getRevalidated, getPage } from './api.js';
 
+// The address the board reads its list from: asked for again here, it is answered from the cache.
+const LISTED = ['/competitions', { activity: 'times' }];
+const STAND_IN = '<p class="b-note" role="status">This bounty’s own page is not answering yet, so these figures come from the board’s list. Refresh to try again.</p>';
 const PHASE_NAMES = { intake: 'When you enter', transcripts: 'Transcripts', grading: 'Grading', claim: 'Claiming a prize', claim_request: 'Claim request' };
 
 async function loadBounty(ctx, slug) {
   const base = `/competitions/${encodeURIComponent(slug)}`;
   const options = { force: ctx.force };
+  let standIn = false;
   const [bounty, requirements, standings] = await Promise.all([
-    getRevalidated(`${base}?submissions=summary`, options).catch(failure => {
+    getRevalidated(`${base}?submissions=summary`, options).catch(async failure => {
       if (failure.status === 404) throw new Error(`make.fun has no bounty called “${slug}”.`);
-      throw failure;
+      // A new bounty's own address answers 503 board_pending until its board is built, and any address can fail
+      // for a moment. The board's list carries the same bounty (pot, fee, deadline, rewards) and is already held
+      // in the cache, so its row stands in and the page stays useful instead of turning into an error.
+      const listed = await getPage(...LISTED).then(page => page.rows.find(row => row?.slug === slug), () => null);
+      if (!listed) throw failure;
+      standIn = true;
+      return listed;
     }),
     // The page still stands without rules or standings, so those two fail soft.
     getRevalidated(`${base}/requirements`, options).catch(() => ({})),
     getPage(`${base}/leaderboard`, { rows: 'first' }).then(page => ({ rows: page.rows, body: page.body }), () => ({ rows: [], body: {}, failed: true })),
   ]);
   if (!bounty || typeof bounty !== 'object') throw new Error('make.fun sent an unreadable bounty.');
-  return { bounty, requirements: requirements ?? {}, standings };
+  return { bounty, requirements: requirements ?? {}, standings, standIn };
 }
 
 function readSheet(bounty, requirements, standings) {
@@ -179,6 +189,7 @@ function pageHTML(sheet) {
       <h1 class="title">${esc(bounty.title || slug)}</h1>
       ${bounty.summary ? `<p class="lede">${esc(bounty.summary)}</p>` : ''}
     </header>
+    ${sheet.standIn ? STAND_IN : ''}
     <div class="b-money">${potHTML(sheet)}${statsHTML(sheet)}</div>
     <div class="b-nav">
       <nav class="tabs" aria-label="Bounty"><a href="${hrefBounty(slug)}" aria-current="page">Overview</a><a href="${hrefLeaderboard(slug)}">Leaderboard</a></nav>
@@ -207,6 +218,7 @@ function peekHTML(sheet) {
       <h2 class="title"><a href="${hrefBounty(slug)}">${esc(bounty.title || slug)}</a></h2>
       ${bounty.summary ? `<p class="lede">${esc(bounty.summary)}</p>` : ''}
     </header>
+    ${sheet.standIn ? STAND_IN : ''}
     <div class="b-ticket">
       ${potHTML(sheet)}
       ${statsHTML(sheet, { places: false })}

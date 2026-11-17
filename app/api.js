@@ -1,6 +1,5 @@
-export const API = 'https://make.fun/api';
-const etagCache = new Map();
-export async function getRevalidated(path, { force = false, freshFor = FRESH_MS } = {}) {
+export async function getRevalidated(path, opts = {}) {
+  const { force = false, freshFor = FRESH_MS } = opts;
   if (typeof path !== 'string' || path[0] !== '/' || path[1] === '/') throw new Error('Not a make.fun API path');
   const held = etagCache.get(path);
   if (held && !force && Date.now() - held.at < freshFor) return tally('cached', held.body);
@@ -10,8 +9,8 @@ export async function getRevalidated(path, { force = false, freshFor = FRESH_MS 
   inFlight.set(path, job);
   return job;
 }
-export async function getPage(path, query = {}, cursor = null, options = {}) {
-  const body = await getRevalidated(withQuery(path, cursor ? { ...query, cursor } : query), options);
+export async function getPage(path, query, cursor, opts) {
+  const body = await getRevalidated(withQuery(path, cursor ? { ...query, cursor } : query), opts);
   const next = nextCursorOf(body);
   return { rows: rowsOf(body), next: next && next !== cursor ? next : null, body };
 }
@@ -19,6 +18,8 @@ export const nextCursorOf = body => body?.next_cursor ?? body?.pagination?.next_
 export const rowsOf = body => Array.isArray(body) ? body : body?.items ?? body?.entries ?? body?.rows ?? [];
 export const stats = { requests: 0, revalidated: 0, cached: 0, offline: false };
 
+export const API = 'https://make.fun/api';
+const etagCache = new Map();
 const FRESH_MS = 20000;
 const KEEP = 24;
 const inFlight = new Map();

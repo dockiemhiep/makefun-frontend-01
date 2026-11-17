@@ -3,13 +3,13 @@
     "file": "1-board.jpg",
     "path": "#/",
     "viewport": { "width": 1280, "height": 900 },
-    "shows": "the live bounty board beside the bounty closing next"
+    "shows": "the live bounty board beside the bounty closing next: its pot, fee, time left, rewards and dates"
   },
   {
-    "file": "2-bounty.jpg",
-    "path": "#/bounty/makefun-frontend-01",
-    "viewport": { "width": 1280, "height": 900 },
-    "shows": "a bounty page: live pot, entry fee, time left, rewards table, dates"
+    "file": "2-profile-phone.jpg",
+    "path": "#/u/superskie",
+    "viewport": { "width": 390, "height": 844 },
+    "shows": "a builder's public profile at phone width: identity, record, prize money and entry history"
   },
   {
     "file": "3-leaderboard.jpg",

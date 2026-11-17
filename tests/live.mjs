@@ -39,9 +39,10 @@ async function startServer() {
   return { child, base };
 }
 
-async function watch(page, base, where) {
+async function watch(page, base, where, { staged503 = false } = {}) {
   const local = new URL(base).origin;
-  page.on('console', message => { if (message.type() === 'error') problems.console.push(`${where}: ${message.text()}`); });
+  // A probe that stages a 503 itself makes the browser log that answer; those lines are the probe's, not the app's.
+  page.on('console', message => { if (message.type() === 'error' && !(staged503 && /status of 503/.test(message.text()))) problems.console.push(`${where}: ${message.text()}`); });
   page.on('pageerror', error => problems.pageErrors.push(`${where}: ${error.message}`));
   page.on('requestfailed', request => problems.failed.push(`${where}: ${request.url()} ${request.failure()?.errorText ?? ''}`));
   page.on('request', request => {
@@ -58,7 +59,7 @@ async function watch(page, base, where) {
   });
   page.on('response', response => {
     const url = response.url();
-    if (response.status() >= 400) problems.bad.push(`${where}: ${response.status()} ${url}`);
+    if (response.status() >= 400 && !(staged503 && response.status() === 503)) problems.bad.push(`${where}: ${response.status()} ${url}`);
     if (url.startsWith('https://make.fun/api/') && response.status() === 304) net.apiNotModified += 1;
   });
   // What really went over the wire, read from the DevTools protocol: the validator the browser's cache attached to
@@ -261,6 +262,102 @@ async function lifecycle(browser, base, vp) {
   await context.close();
 }
 
+// An opening on the clock. One open bounty is given an opening time a few seconds ahead, in the test's own
+// interception. On the default "Open now" tab it has no row and no clock on screen, so nothing visible is counting
+// down to it; the board must still count it open, add its pot and post its row when the time passes, with exactly
+// one re-render, no reload and no click.
+async function opening(browser, base, vp) {
+  const label = `${vp.name} opening`;
+  const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+  const page = await context.newPage();
+  await watch(page, base, label);
+  const moved = { slug: null, at: 0, pot: 0 };
+  await page.route('https://make.fun/api/competitions?activity=times', async route => {
+    const answer = await route.fetch();
+    const body = await answer.json();
+    const open = body.items
+      .filter(item => item.status === 'open' && Date.parse(item.deadline) > Date.now() + 3600000 && !(Date.parse(item.opensAt) > Date.now()))
+      .sort((a, b) => Date.parse(b.deadline) - Date.parse(a.deadline));
+    if (!moved.slug && open.length >= 2) Object.assign(moved, { slug: open[0].slug, at: Date.now() + 6000, pot: Number(open[0].potUsd ?? open[0].rewardAmount) });
+    for (const item of body.items) if (item.slug === moved.slug) item.opensAt = new Date(moved.at).toISOString();
+    await route.fulfill({ response: answer, json: body });
+  });
+  await page.addInitScript(() => {
+    let ready;
+    window.__renders = 0;
+    Object.defineProperty(window, '__shotReady', { get: () => ready, set: value => { if (value === false) window.__renders += 1; ready = value; } });
+  });
+  await page.goto(`${base}/#/`);
+  await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+  if (!check(`${label}: at least two open bounties to work with`, Boolean(moved.slug))) return context.close();
+  const read = () => page.evaluate(slug => ({
+    open: Number(document.querySelector('#board .bd-big')?.innerText),
+    pot: Number(document.querySelector('#board .bd-pots .tag')?.innerText.replace(/[$,]/g, '')),
+    soon: Number(document.querySelector('#board [data-count="soon"]')?.innerText),
+    row: document.querySelector(`#board [data-slug="${slug}"]`)?.dataset.phase ?? 'no row',
+    renders: window.__renders,
+    at: new Date().toISOString(),
+  }), moved.slug);
+  const before = await read();
+  check(`${label}: the upcoming bounty has no row on the open tab`, before.row === 'no row', before.row);
+  check(`${label}: it is counted as opening soon`, before.soon >= 1, String(before.soon));
+  check(`${label}: no clock on screen counts down to the opening`, await page.evaluate(at => !document.querySelector(`[data-until="${at}"]`), moved.at));
+  await page.waitForTimeout(Math.max(0, moved.at - Date.now()) + 2500);
+  await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+  const after = await read();
+  check(`${label}: opens on its own, with no click`, after.row === 'open', after.row);
+  check(`${label}: open count rises by one`, after.open === before.open + 1, `${before.open} -> ${after.open}`);
+  check(`${label}: live-pot sum rises by that pot`, Math.abs(after.pot - before.pot - moved.pot) < 5, `${before.pot} -> ${after.pot}`);
+  check(`${label}: opening-soon count drops by one`, after.soon === before.soon - 1, `${before.soon} -> ${after.soon}`);
+  check(`${label}: exactly one re-render`, after.renders === before.renders + 1, `${before.renders} -> ${after.renders}`);
+  console.log(`${label}: opens ${new Date(moved.at).toISOString()} | before ${before.at} open ${before.open} pot $${before.pot} soon ${before.soon} | after ${after.at} open ${after.open} pot $${after.pot} soon ${after.soon}, ${after.renders - before.renders} re-render, no interaction`);
+  rows.push({ viewport: vp.name, route: 'opening flip (simulated)', result: failures.some(text => text.startsWith(label)) ? 'FAIL' : 'ok', note: `${before.open}->${after.open} open` });
+  await context.close();
+}
+
+// A bounty whose own address is not ready. Every read under /competitions/<slug> (its summary, rules and standings)
+// is answered 503 board_pending here, as make.fun answers for a bounty whose board is not built yet. The featured
+// pane on the cover, and the bounty's own page, must stay useful on the board list's data instead of an error.
+async function pending(browser, base, vp) {
+  const label = `${vp.name} pending`;
+  const context = await browser.newContext({ viewport: { width: vp.width, height: vp.height } });
+  const page = await context.newPage();
+  await watch(page, base, label, { staged503: true });
+  let staged = 0;
+  await page.route(url => url.href.startsWith('https://make.fun/api/competitions/'), async route => {
+    staged += 1;
+    await route.fulfill({ status: 503, headers: { 'access-control-allow-origin': '*', 'retry-after': '5' }, json: { error: 'The board is being built.', code: 'board_pending', retry_after: 5 } });
+  });
+  await page.goto(`${base}/#/`);
+  await page.waitForFunction(() => window.__shotReady === true, null, { timeout: 30000 });
+  const pane = () => page.evaluate(() => {
+    const view = document.querySelector('#view');
+    return { text: view.innerText, slug: view.querySelector('[data-bounty]')?.dataset.bounty ?? '', pot: view.querySelector('.tag.big')?.innerText ?? '', rewards: view.querySelectorAll('table.grid tbody tr').length, clock: view.querySelectorAll('[data-until]').length };
+  });
+  let slug = '';
+  if (vp.width >= 1000) {
+    const cover = await pane();
+    slug = cover.slug;
+    check(`${label}: the 503 was staged`, staged >= 1, String(staged));
+    check(`${label}: featured pane is not an error`, !/did not load|answered 503/i.test(cover.text), cover.text.slice(0, 80));
+    check(`${label}: featured pane names a bounty`, cover.slug !== '');
+    check(`${label}: featured pane shows the pot`, cover.pot.includes('$'), cover.pot);
+    check(`${label}: featured pane shows rewards from the list`, cover.rewards >= 1, String(cover.rewards));
+    check(`${label}: featured pane keeps its countdown`, cover.clock >= 1, String(cover.clock));
+    check(`${label}: featured pane says where the figures come from`, /board’s list/.test(cover.text));
+    if (process.env.PENDING_SHOT) await page.screenshot({ path: process.env.PENDING_SHOT });
+  } else {
+    slug = await page.$eval('#board [data-slug]', el => el.dataset.slug);
+  }
+  await go(page, `#/bounty/${slug}`);
+  const own = await pane();
+  check(`${label}: bounty page is not an error`, !/did not load|answered 503/i.test(own.text), own.text.slice(0, 80));
+  check(`${label}: bounty page shows pot, rewards and dates`, own.pot.includes('$') && own.rewards >= 1 && /\d{4}/.test(own.text), `${own.pot} ${own.rewards}`);
+  await common(page, label);
+  rows.push({ viewport: vp.name, route: 'summary 503 fallback (simulated)', result: failures.some(text => text.startsWith(label)) ? 'FAIL' : 'ok', note: slug });
+  await context.close();
+}
+
 async function settle(page) {
   await page.evaluate(async () => {
     await document.fonts.ready;
@@ -315,6 +412,8 @@ try {
   try {
     for (const vp of VIEWPORTS) await walk(browser, server.base, vp);
     for (const vp of VIEWPORTS) await lifecycle(browser, server.base, vp);
+    for (const vp of VIEWPORTS) await opening(browser, server.base, vp);
+    for (const vp of VIEWPORTS) await pending(browser, server.base, vp);
     if (takeShots) await shoot(browser, server.base);
   } finally {
     await browser.close();

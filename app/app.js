@@ -1,11 +1,7 @@
 import { onStats } from './api.js';
 
-const boardRoute = [/^\/$/, () => import('./board.js'), 'mountBoard'];
-const bountyRoute = [/^\/bounty\/([^/]+)$/, () => import('./bounty.js'), 'renderBounty'];
-const leaderboardRoute = [/^\/bounty\/([^/]+)\/leaderboard$/, () => import('./leaderboard.js'), 'renderLeaderboard'];
-const profileRoute = [/^\/u\/([^/]+)$/, () => import('./profile.js'), 'renderProfile'];
-const buildersRoute = [/^\/builders$/, () => import('./profile.js'), 'renderBuilders'];
-const ROUTES = { board: boardRoute, bounty: bountyRoute, leaderboard: leaderboardRoute, profile: profileRoute, builders: buildersRoute };
+// Every address the app answers, in the order of VIEWS below: one view each, on its own route.
+const ROUTES = ['/', '/bounty/:slug', '/bounty/:slug/leaderboard', '/u/:handle', '/builders'];
 
 export const hrefBounty = slug => `#/bounty/${encodeURIComponent(slug)}`;
 export const hrefLeaderboard = slug => `${hrefBounty(slug)}/leaderboard`;
@@ -119,10 +115,22 @@ export function setTitle(text) {
   document.title = text ? `${text} · make.fun` : 'make.fun bounty board';
 }
 
+// Each route's name, the module that draws it (fetched the first time its address is opened) and that module's entry.
+const VIEWS = [
+  ['board', () => import('./board.js'), 'mountBoard'],
+  ['bounty', () => import('./bounty.js'), 'renderBounty'],
+  ['leaderboard', () => import('./leaderboard.js'), 'renderLeaderboard'],
+  ['profile', () => import('./profile.js'), 'renderProfile'],
+  ['builders', () => import('./profile.js'), 'renderBuilders'],
+];
+const TABLE = ROUTES.map((path, at) => [new RegExp(`^${path.replace(/:\w+/g, '([^/]+)')}$`), ...VIEWS[at]]);
+const [boardRoute, bountyRoute, leaderboardRoute, profileRoute, buildersRoute] = TABLE;
+
 const WIDE = globalThis.matchMedia?.('(min-width: 1000px)');
 let navigation = 0;
 let listeners = null;
 let flipping = false;
+let flipAt = Infinity;
 let bar, boardPane, viewPane;
 
 function readHash() {
@@ -137,14 +145,14 @@ export async function renderRoute({ force = false, keepScroll = false } = {}) {
   window.__shotReady = false;
   const { path, params } = readHash();
   let route = null, name = 'lost', arg = '';
-  for (const [known, candidate] of Object.entries(ROUTES)) {
+  for (const candidate of TABLE) {
     const hit = candidate[0].exec(path);
     if (!hit) continue;
-    try { arg = decodeURIComponent(hit[1] ?? ''); route = candidate; name = known; } catch { route = null; }
+    try { arg = decodeURIComponent(hit[1] ?? ''); route = candidate; name = candidate[1]; } catch { route = null; }
     break;
   }
   // Each route names its module and the export that draws it; the module is fetched the first time it is needed.
-  const open = ([, load, entry], ...args) => load().then(view => view[entry](...args));
+  const open = ([, , load, entry], ...args) => load().then(view => view[entry](...args));
   const wide = WIDE.matches;
   document.body.dataset.route = name;
   for (const link of bar.querySelectorAll('[data-tab]')) {
@@ -177,7 +185,7 @@ export async function renderRoute({ force = false, keepScroll = false } = {}) {
       // On a wide screen the board's own address posts the bounty closing next beside it.
       const { featured } = await board;
       if (!alive()) return;
-      if (wide && featured) await open(bountyRoute, ctx, featured, { peek: true });
+      if (wide && featured) await open(bountyRoute, ctx, featured, true);
       else viewPane.replaceChildren();
       setTitle('');
     } else if (route) {
@@ -205,10 +213,21 @@ export async function renderRoute({ force = false, keepScroll = false } = {}) {
   }
 }
 
-// One pass a second over every visible clock; a clock that runs out flips the route to its closed state once.
+// The board posts the next moment any bounty in its list changes phase by the clock alone: an upcoming one opening
+// or an open one closing. tick() watches that time as well as the clocks on screen, so a bounty with no row in
+// view (an upcoming one behind the "Open now" tab) still flips the board when its time comes.
+export function watchFlip(at) {
+  flipAt = at;
+}
+
+// One pass a second over every clock on screen and the board's next flip; whichever runs out re-renders once.
 function tick() {
   if (document.hidden) return;
   let ranOut = false, inView = false;
+  if (flipAt <= Date.now() && !flipping) {
+    ranOut = true;
+    flipAt = Infinity;
+  }
   for (const clock of document.querySelectorAll('[data-until]')) {
     const until = Number(clock.dataset.until);
     if (until <= Date.now()) {

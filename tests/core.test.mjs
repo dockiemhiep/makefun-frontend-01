@@ -237,3 +237,19 @@ test('boardTotals excludes not-yet-opened and past-deadline-but-status-open boun
   assert.equal(totals.pot, 150, 'pot sums only the open ones');
   assert.deepEqual({ open: boardTotals([], T).open, pot: boardTotals([], T).pot }, { open: 0, pot: 0 });
 });
+
+test('nextFlip names the earliest opening or closing in the whole list: a hidden upcoming bounty must still flip the board', async () => {
+  const { nextFlip } = await import('../app/board.js');
+  const opens = '2026-06-01T12:00:04Z';
+  const list = [
+    bounty({ deadline: '2026-06-10T00:00:00Z' }),
+    bounty({ opensAt: opens }),
+    bounty({ opensAt: '2026-06-03T00:00:00Z' }),
+    bounty({ status: 'resolved', deadline: '2026-06-01T12:00:01Z' }),
+    bounty({ deadline: '2026-05-30T00:00:00Z' }),
+  ];
+  assert.equal(nextFlip(list, T), Date.parse(opens), 'the opening four seconds away comes before any closing');
+  assert.equal(nextFlip(list, Date.parse(opens)), Date.parse('2026-06-03T00:00:00Z'), 'once it has opened, the next opening is watched');
+  assert.equal(nextFlip([bounty()], T), Date.parse('2026-06-10T00:00:00Z'), 'with nothing upcoming, the next closing');
+  assert.equal(nextFlip([bounty({ status: 'resolved' })], T), Infinity, 'nothing to wait for');
+});

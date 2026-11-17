@@ -1,7 +1,5 @@
-const BOARD_API = '/competitions';
-
-export async function mountBoard(pane, options = {}) {
-  const { params = null, selected = '', force = false, alive = () => true, setQuery = null } = options;
+export async function mountBoard(pane, opts) {
+  const { params = null, selected = '', force = false, alive = () => true, setQuery = null } = opts;
   try {
     if (params) readQuery(params);
     board.onBoard = Boolean(params);
@@ -41,6 +39,18 @@ export function boardTotals(bounties, now = Date.now()) {
   return { open: live.length, pot: Math.round(pot * 100) / 100, next };
 }
 
+// The next moment a bounty changes phase by the clock alone: an upcoming one opens or an open one closes. It is
+// read from the whole list, not from the rows on screen, and app.js re-renders once when it passes.
+export function nextFlip(bounties, now = Date.now()) {
+  let soonest = Infinity;
+  for (const bounty of bounties) {
+    const phase = phaseOf(bounty, now);
+    const at = phase === 'soon' ? opensAt(bounty) : phase === 'open' ? closesAt(bounty) : NaN;
+    if (at > now && at < soonest) soonest = at;
+  }
+  return soonest;
+}
+
 function patchRowsInPlace(list, shown, highlight) {
   let cursor = list.firstElementChild;
   for (const bounty of shown) {
@@ -63,8 +73,9 @@ function patchRowsInPlace(list, shown, highlight) {
 }
 
 import { getPage, getRevalidated, withQuery } from './api.js';
-import { closesAt, count, countdownHTML, emptyHTML, entriesOf, esc, feeOf, hrefBounty, opensAt, pagerHTML, phaseOf, potOf, renderRoute, usd } from './app.js';
+import { closesAt, count, countdownHTML, emptyHTML, entriesOf, esc, feeOf, hrefBounty, opensAt, pagerHTML, phaseOf, potOf, renderRoute, usd, watchFlip } from './app.js';
 
+const BOARD_API = '/competitions';
 const QUERY = { activity: 'times' };
 const PER_PAGE = 12;
 const VIEWS = [
@@ -237,6 +248,7 @@ function paintBoard() {
   const all = [...board.list.values()];
   const phases = new Map(all.map(bounty => [bounty.slug, phaseOf(bounty, now)]));
 
+  watchFlip(nextFlip(all, now));
   const totals = boardTotals(all, now);
   setText(parts.open, String(totals.open));
   setText(parts.pot, usd(totals.pot));
