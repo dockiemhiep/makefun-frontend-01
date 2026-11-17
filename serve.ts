@@ -1,5 +1,5 @@
 // A tiny static server for app/ (Node 22, standard library only), so the frontend can be run locally without a
-// build step: `node serve.ts` serves app/ on http://localhost:8080 (`--port <n>` for another port). It sends the MIME
+// build step: `node serve.ts` serves app/ on http://localhost:8080 (`--port <n>` or PORT for another port). It sends the MIME
 // types a browser needs, refuses any path outside app/, and otherwise does nothing clever: this is a development
 // convenience, not a web server for the internet.
 import { createReadStream, statSync } from 'node:fs';
@@ -10,8 +10,11 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(fileURLToPath(new URL('./app', import.meta.url)));
 const args = process.argv.slice(2);
 const portIndex = args.indexOf('--port');
-const requested = portIndex === -1 ? 8080 : Number(args[portIndex + 1]);
-const port = Number.isInteger(requested) && requested > 0 && requested < 65536 ? requested : 8080;
+const requested = portIndex === -1 ? process.env.PORT ?? '8080' : args[portIndex + 1];
+if (!requested || !/^\d+$/.test(requested) || Number(requested) > 65535) {
+  throw new Error('Use --port or PORT with an integer from 0 to 65535 (0 chooses a free port).');
+}
+const port = Number(requested);
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -29,7 +32,7 @@ const MIME: Record<string, string> = {
   '.webmanifest': 'application/manifest+json',
 };
 
-createServer((request, response) => {
+const server = createServer((request, response) => {
   const url = new URL(request.url ?? '/', 'http://localhost');
   let pathname: string;
   try {
@@ -60,5 +63,6 @@ createServer((request, response) => {
   });
   createReadStream(file).pipe(response);
 }).listen(port, '127.0.0.1', () => {
-  console.log(`app/ is on http://localhost:${port}`);
+  const address = server.address();
+  if (address && typeof address !== 'string') console.log(`app/ is on http://127.0.0.1:${address.port}`);
 });
